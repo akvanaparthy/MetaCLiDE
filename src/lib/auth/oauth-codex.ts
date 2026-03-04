@@ -54,16 +54,27 @@ function writeCodexTokens(tokens: CodexTokens): void {
 }
 
 export function getCodexApiKey(): string | null {
-  // Check env first
+  // BYOK: env var takes precedence
   const envKey = (process.env.CODEX_API_KEY ?? process.env.OPENAI_API_KEY ?? '').trim()
   if (envKey) return envKey
 
+  // Subscription OAuth: extracted key stored alongside tokens.
+  // If only OAuth tokens are stored (no extracted key), return a sentinel so
+  // callers know there IS a valid session — codex exec will use auth.json itself.
   const tokens = readCodexTokens()
-  return tokens?.openai_api_key ?? null
+  if (tokens?.openai_api_key) return tokens.openai_api_key
+  if (tokens?.tokens?.access_token) return '__oauth_session__'
+  return null
 }
 
 export function hasCodexSession(): boolean {
   return getCodexApiKey() !== null
+}
+
+// Returns true when there is a live OAuth session (subscription mode)
+export function hasCodexOAuthSession(): boolean {
+  const tokens = readCodexTokens()
+  return !!(tokens?.tokens?.access_token)
 }
 
 // ── Token exchange: id_token → API key ──
@@ -121,8 +132,18 @@ export interface OAuthProgress {
   url?: string
 }
 
+export interface CodexLoginOptions {
+  /**
+   * subscription: Store OAuth tokens → codex exec uses ChatGPT subscription credits.
+   * byok: Also extract an openai_api_key → uses API billing.
+   * Default: subscription (matches what the user paid for).
+   */
+  mode?: 'subscription' | 'byok'
+}
+
 export async function loginCodexBrowser(
-  onProgress: (event: OAuthProgress) => void
+  onProgress: (event: OAuthProgress) => void,
+  opts: CodexLoginOptions = {}
 ): Promise<string> {
   const {verifier, challenge} = generatePKCE()
   const state = crypto.randomBytes(16).toString('hex')
@@ -158,22 +179,30 @@ export async function loginCodexBrowser(
         try {
           onProgress({type: 'waiting', message: 'Exchanging tokens...'})
           const tokens = await exchangeAuthCode(code, verifier, redirectUri)
-          const apiKey = await exchangeForApiKey(tokens.id_token)
 
-          writeCodexTokens({
-            auth_mode: 'chatgpt',
-            openai_api_key: apiKey,
-            tokens: {
-              id_token: tokens.id_token,
-              access_token: tokens.access_token,
-              refresh_token: tokens.refresh_token,
-            },
-            last_refresh: new Date().toISOString(),
-          })
-
-          onProgress({type: 'success', message: 'Codex OAuth login successful'})
-          server.close()
-          resolve(apiKey)
+          if (opts.mode === 'byok') {
+            // Extract API key → uses OpenAI API billing (not subscription)
+            const apiKey = await exchangeForApiKey(tokens.id_token)
+            writeCodexTokens({
+              auth_mode: 'chatgpt',
+              openai_api_key: apiKey,
+              tokens: {id_token: tokens.id_token, access_token: tokens.access_token, refresh_token: tokens.refresh_token},
+              last_refresh: new Date().toISOString(),
+            })
+            onProgress({type: 'success', message: 'Codex connected (API billing mode)'})
+            server.close()
+            resolve(apiKey)
+          } else {
+            // Subscription mode: store OAuth tokens only — codex exec uses subscription credits
+            writeCodexTokens({
+              auth_mode: 'chatgpt',
+              tokens: {id_token: tokens.id_token, access_token: tokens.access_token, refresh_token: tokens.refresh_token},
+              last_refresh: new Date().toISOString(),
+            })
+            onProgress({type: 'success', message: 'Codex connected (subscription mode)'})
+            server.close()
+            resolve('__oauth_session__')
+          }
         } catch (err) {
           server.close()
           reject(err)
@@ -223,7 +252,8 @@ export async function loginCodexBrowser(
 // ── Flow B: Device Code Flow ──
 
 export async function loginCodexDevice(
-  onProgress: (event: OAuthProgress) => void
+  onProgress: (event: OAuthProgress) => void,
+  opts: CodexLoginOptions = {}
 ): Promise<string> {
   // Step 1: Request user code
   const ucRes = await fetch(`${AUTH_HOST}/api/accounts/deviceauth/usercode`, {
@@ -282,21 +312,27 @@ export async function loginCodexDevice(
 
       const redirectUri = 'https://auth.openai.com/deviceauth/callback'
       const tokens = await exchangeAuthCode(pollData.authorization_code, pollData.code_verifier, redirectUri)
-      const apiKey = await exchangeForApiKey(tokens.id_token)
 
-      writeCodexTokens({
-        auth_mode: 'chatgpt',
-        openai_api_key: apiKey,
-        tokens: {
-          id_token: tokens.id_token,
-          access_token: tokens.access_token,
-          refresh_token: tokens.refresh_token,
-        },
-        last_refresh: new Date().toISOString(),
-      })
-
-      onProgress({type: 'success', message: 'Codex OAuth login successful'})
-      return apiKey
+      if (opts.mode === 'byok') {
+        const apiKey = await exchangeForApiKey(tokens.id_token)
+        writeCodexTokens({
+          auth_mode: 'chatgpt',
+          openai_api_key: apiKey,
+          tokens: {id_token: tokens.id_token, access_token: tokens.access_token, refresh_token: tokens.refresh_token},
+          last_refresh: new Date().toISOString(),
+        })
+        onProgress({type: 'success', message: 'Codex connected (API billing mode)'})
+        return apiKey
+      } else {
+        // Subscription mode: store OAuth tokens only
+        writeCodexTokens({
+          auth_mode: 'chatgpt',
+          tokens: {id_token: tokens.id_token, access_token: tokens.access_token, refresh_token: tokens.refresh_token},
+          last_refresh: new Date().toISOString(),
+        })
+        onProgress({type: 'success', message: 'Codex connected (subscription mode)'})
+        return '__oauth_session__'
+      }
     }
 
     // Unexpected error
@@ -330,8 +366,8 @@ export async function refreshCodexTokens(): Promise<string | null> {
 
     const res = await fetch(`${AUTH_HOST}/oauth/token`, {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(Object.fromEntries(body)),
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: body.toString(),
     })
 
     if (!res.ok) return null

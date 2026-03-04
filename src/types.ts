@@ -19,7 +19,8 @@ export interface PeerConfig {
   contextFile: string
   branch: string
   role: PeerRole
-  apiKey?: string  // resolved at runtime from keychain
+  apiKey?: string    // resolved at runtime from keychain
+  baseURL?: string   // for custom OpenAI-compatible providers
 }
 
 export interface PeersFile {

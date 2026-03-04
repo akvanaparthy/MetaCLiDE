@@ -43,26 +43,36 @@ const DEFAULT_MODELS: Record<string, string> = {
   moonshot: 'kimi-k2-thinking-turbo',
 }
 
-export const AVAILABLE_MODELS: Record<string, string[]> = {
-  anthropic: [
-    'claude-sonnet-4-20250514',
-    'claude-opus-4-20250514',
-    'claude-haiku-4-20250514',
-  ],
-  openai: [
-    'o4-mini',
-    'gpt-4.1',
-    'gpt-4.1-mini',
-    'gpt-4.1-nano',
-    'o3',
-    'o3-mini',
-  ],
-  moonshot: [
-    'kimi-k2-thinking-turbo',
-    'moonshot-v1-8k',
-    'moonshot-v1-32k',
-    'moonshot-v1-128k',
-  ],
+const API_BASES: Record<string, string> = {
+  anthropic: 'https://api.anthropic.com',
+  openai: 'https://api.openai.com',
+  moonshot: 'https://api.moonshot.cn',
+}
+
+const modelsCache: Record<string, string[]> = {}
+
+export async function fetchAvailableModels(provider: string, apiKey: string): Promise<string[]> {
+  if (modelsCache[provider]?.length) return modelsCache[provider]
+
+  try {
+    const base = API_BASES[provider]
+    if (!base) return []
+
+    const headers: Record<string, string> = provider === 'anthropic'
+      ? {'x-api-key': apiKey, 'anthropic-version': '2023-06-01'}
+      : {'Authorization': `Bearer ${apiKey}`}
+
+    const res = await fetch(`${base}/v1/models`, {headers})
+    if (!res.ok) return []
+
+    const data = await res.json() as {data?: Array<{id: string}>}
+    const ids = (data.data ?? []).map(m => m.id).sort()
+
+    modelsCache[provider] = ids
+    return ids
+  } catch {
+    return []
+  }
 }
 
 const TOOL_DEFS = [
@@ -107,15 +117,35 @@ export class ConductorChat {
 
   getModel(): string { return this.model }
   setModel(model: string) { this.model = model }
+  getProvider(): string { return this.config.provider }
+  getApiKey(): string | undefined { return this.config.apiKey }
 
   async *send(userMessage: string): AsyncGenerator<StreamEvent> {
     if (this.config.provider === 'anthropic') {
       yield* this.sendAnthropic(userMessage)
-    } else {
-      // OpenAI-compatible: both BYOK and OAuth use the SDK
-      // OAuth mode gives us an sk-... key from the Codex subscription
-      yield* this.sendOpenAI(userMessage)
+      return
     }
+
+    // OAuth subscription mode: no API key available for direct chat completions.
+    // The CLI (codex exec / kimi --print) handles auth from credential files.
+    // For the conductor chat phase we can only do direct API calls, so inform the user.
+    if (!this.config.apiKey || this.config.apiKey === '__oauth_session__') {
+      yield {
+        type: 'text',
+        content: [
+          `${this.config.provider === 'openai' ? 'Codex' : 'Kimi'} is connected via subscription OAuth — great for running coding tasks.`,
+          '',
+          'For the planning chat, an API key is needed (the chat calls the API directly).',
+          'You can:',
+          '  • Type /run to start agents immediately (subscription credits used)',
+          '  • Or add an API key: metaclide connect --agent codex --key <key>',
+        ].join('\n'),
+      }
+      yield {type: 'done'}
+      return
+    }
+
+    yield* this.sendOpenAI(userMessage)
   }
 
   // ── Anthropic ──
@@ -232,8 +262,8 @@ export class ConductorChat {
 
   private async *sendOpenAI(userMessage: string): AsyncGenerator<StreamEvent> {
     const {OpenAI} = await import('openai')
-    // Moonshot BYOK uses their own endpoint; Kimi OAuth also uses moonshot API
-    const baseURL = this.config.provider === 'moonshot' ? 'https://api.moonshot.cn/v1' : undefined
+    // Moonshot uses international endpoint; .cn as fallback
+    const baseURL = this.config.provider === 'moonshot' ? 'https://api.moonshot.ai/v1' : undefined
     const client = new OpenAI({apiKey: this.config.apiKey, baseURL})
     const model = this.model
 
@@ -242,47 +272,64 @@ export class ConductorChat {
     this.openaiMessages.push({role: 'user', content: userMessage})
 
     try {
-      const response = await client.chat.completions.create({
+      // Use streaming for responsive output
+      const stream = await client.chat.completions.create({
         model,
         max_tokens: 4096,
         messages: this.openaiMessages as never,
         tools,
+        stream: true,
       })
 
-      const choice = response.choices[0]
-      const msg = choice.message
+      let content = ''
+      const toolCalls: Array<{id: string; name: string; arguments: string}> = []
+      let currentTool: {id: string; name: string; arguments: string} | null = null
 
-      this.openaiMessages.push({
-        role: 'assistant',
-        content: msg.content,
-        tool_calls: msg.tool_calls as unknown[] | undefined,
-      })
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta
+        if (!delta) continue
 
-      if (msg.content) {
-        yield {type: 'text', content: msg.content}
+        if (delta.content) {
+          content += delta.content
+          yield {type: 'text', content: delta.content}
+        }
+
+        if (delta.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            if (tc.index !== undefined) {
+              if (!toolCalls[tc.index]) {
+                toolCalls[tc.index] = {id: tc.id ?? '', name: tc.function?.name ?? '', arguments: ''}
+                if (tc.function?.name) yield {type: 'tool_start', toolName: tc.function.name}
+              }
+              if (tc.function?.arguments) toolCalls[tc.index].arguments += tc.function.arguments
+              if (tc.id) toolCalls[tc.index].id = tc.id
+            }
+          }
+        }
       }
 
-      if (msg.tool_calls && msg.tool_calls.length > 0) {
-        for (const tc of msg.tool_calls) {
-          const fn = tc.function
-          yield {type: 'tool_start', toolName: fn.name}
-          const args = JSON.parse(fn.arguments) as Record<string, unknown>
-          const result = this.executeTool(fn.name, args)
-          yield {type: 'tool_done', toolName: fn.name, content: result}
+      this.openaiMessages.push({role: 'assistant', content: content || null, tool_calls: toolCalls.length > 0 ? toolCalls.map(tc => ({id: tc.id, type: 'function', function: {name: tc.name, arguments: tc.arguments}})) : undefined} as never)
+
+      if (toolCalls.length > 0) {
+        for (const tc of toolCalls) {
+          const args = JSON.parse(tc.arguments || '{}') as Record<string, unknown>
+          const result = this.executeTool(tc.name, args)
+          yield {type: 'tool_done', toolName: tc.name, content: result}
           this.openaiMessages.push({role: 'tool', content: result, tool_call_id: tc.id} as never)
         }
 
-        // Follow-up
-        const followUp = await client.chat.completions.create({
-          model,
-          max_tokens: 4096,
+        // Follow-up after tool calls
+        const followStream = await client.chat.completions.create({
+          model, max_tokens: 4096,
           messages: this.openaiMessages as never,
-          tools,
+          tools, stream: true,
         })
-
-        const fMsg = followUp.choices[0].message
-        this.openaiMessages.push({role: 'assistant', content: fMsg.content})
-        if (fMsg.content) yield {type: 'text', content: fMsg.content}
+        let followContent = ''
+        for await (const chunk of followStream) {
+          const delta = chunk.choices[0]?.delta?.content
+          if (delta) { followContent += delta; yield {type: 'text', content: delta} }
+        }
+        this.openaiMessages.push({role: 'assistant', content: followContent})
       }
 
       yield {type: 'done'}

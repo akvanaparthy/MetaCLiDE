@@ -3,6 +3,20 @@ import path from 'node:path'
 import {simpleGit, SimpleGit} from 'simple-git'
 import {worktreePath as wtp} from '../orch/paths.js'
 
+function symlinkOrch(repoRoot: string, wtPath: string): void {
+  const orchLink = path.join(wtPath, '.orch')
+  if (fs.existsSync(orchLink)) return
+  const orchSrc = path.join(repoRoot, '.orch')
+  if (!fs.existsSync(orchSrc)) return
+  // 'junction' works on both Windows and Unix for directories
+  try {
+    fs.symlinkSync(orchSrc, orchLink, 'junction')
+  } catch {
+    // If junction fails (non-Windows), try regular symlink
+    try { fs.symlinkSync(orchSrc, orchLink) } catch { /* non-fatal */ }
+  }
+}
+
 export class WorktreeManager {
   private git: SimpleGit
 
@@ -30,6 +44,7 @@ export class WorktreeManager {
       await this.git.raw(['worktree', 'add', '-b', branch, wtPath, mainBranch])
     }
 
+    symlinkOrch(this.repoRoot, wtPath)
     return wtPath
   }
 

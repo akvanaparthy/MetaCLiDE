@@ -127,6 +127,15 @@ export class OrchManager {
     fs.writeFileSync(this.paths.brief, content)
   }
 
+  updatePeerModel(peerId: string, model: string): void {
+    const peers = this.readPeers()
+    if (!peers) return
+    const peer = peers.peers.find(p => p.id === peerId)
+    if (!peer) return
+    peer.model = model
+    this.writePeers(peers)
+  }
+
   appendThread(threadId: string, content: string): void {
     const p = path.join(this.paths.threads, `${threadId}.md`)
     fs.appendFileSync(p, content + '\n')

@@ -11,6 +11,7 @@ export const PeerConfigSchema = z.object({
   contextFile: z.string(),
   branch: z.string(),
   role: z.enum(['conductor', 'implementer']),
+  baseURL: z.string().optional(),
 })
 
 export const PeersFileSchema = z.object({

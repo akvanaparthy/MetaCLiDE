@@ -5,6 +5,8 @@ import path from 'node:path'
 import {findRepoRoot} from '../lib/orch/index.js'
 import {isKeytarAvailable} from '../lib/auth/keychain.js'
 import {detectInstalledCLIs} from '../lib/auth/session.js'
+import {hasCodexOAuthSession, getCodexApiKey} from '../lib/auth/oauth-codex.js'
+import {hasKimiSession} from '../lib/auth/oauth-kimi.js'
 
 interface CheckResult {
   name: string
@@ -66,33 +68,56 @@ export default class Doctor extends Command {
       message: keytarOk ? 'Available' : 'Not available — using fallback file storage (~/.metaclide/credentials.json)',
     })
 
-    // Agent CLIs
+    // Agent CLIs + auth status
     const clis = detectInstalledCLIs()
-    const cliChecks: Array<{id: string; name: string}> = [
-      {id: 'claude', name: 'claude (Claude Code CLI)'},
-      {id: 'codex', name: 'codex (Codex CLI)'},
-      {id: 'kimi', name: 'kimi (Kimi Code CLI)'},
-    ]
-    for (const {id, name} of cliChecks) {
-      checks.push({
-        name,
-        status: clis[id] ? 'ok' : 'warn',
-        message: clis[id] ? 'Found' : 'Not found (optional — can use BYOK API instead)',
-      })
-    }
+
+    // Claude
+    const hasAnthropicKey = Boolean(process.env.ANTHROPIC_API_KEY)
+    checks.push({
+      name: 'Claude Code',
+      status: hasAnthropicKey ? 'ok' : 'warn',
+      message: hasAnthropicKey
+        ? `API key set (BYOK) — full agent via @anthropic-ai/claude-agent-sdk`
+        : 'No API key — set ANTHROPIC_API_KEY or run: metaclide connect --agent claude',
+    })
+
+    // Codex
+    const codexSub = hasCodexOAuthSession()
+    const codexKey = getCodexApiKey()
+    const codexCliInstalled = clis['codex'] ?? false
+    checks.push({
+      name: 'Codex CLI',
+      status: codexCliInstalled ? 'ok' : 'warn',
+      message: codexCliInstalled
+        ? `Installed — ${codexSub ? '✓ subscription (ChatGPT)' : codexKey ? '✓ API key' : 'not authenticated — run: metaclide connect --agent codex --oauth'}`
+        : 'Not installed — agents will use agentic API loop (install: npm i -g @openai/codex for CLI mode)',
+    })
+
+    // Kimi
+    const kimiSub = hasKimiSession()
+    const kimiKey = Boolean(process.env.KIMI_API_KEY ?? process.env.MOONSHOT_API_KEY)
+    const kimiCliInstalled = clis['kimi'] ?? false
+    checks.push({
+      name: 'Kimi Code CLI',
+      status: kimiCliInstalled ? 'ok' : 'warn',
+      message: kimiCliInstalled
+        ? `Installed — ${kimiSub ? '✓ subscription (Kimi Code)' : kimiKey ? '✓ API key' : 'not authenticated — run: metaclide connect --agent kimi --oauth'}`
+        : 'Not installed — agents will use agentic API loop (install: pip install kimi-cli for CLI mode)',
+    })
 
     // Environment variables
-    const envVars: Array<{key: string; required: boolean}> = [
-      {key: 'ANTHROPIC_API_KEY', required: false},
-      {key: 'OPENAI_API_KEY', required: false},
-      {key: 'MOONSHOT_API_KEY', required: false},
+    const envVars: Array<{key: string; note: string}> = [
+      {key: 'ANTHROPIC_API_KEY', note: 'Claude (required for Claude peer)'},
+      {key: 'OPENAI_API_KEY', note: 'Codex BYOK fallback'},
+      {key: 'KIMI_API_KEY', note: 'Kimi Code BYOK (preferred over MOONSHOT_API_KEY)'},
+      {key: 'MOONSHOT_API_KEY', note: 'Kimi/Moonshot API (fallback)'},
     ]
-    for (const {key, required} of envVars) {
+    for (const {key, note} of envVars) {
       const present = Boolean(process.env[key])
       checks.push({
         name: key,
-        status: present ? 'ok' : required ? 'fail' : 'warn',
-        message: present ? 'Set' : 'Not set (optional — can store via metaclide connect)',
+        status: present ? 'ok' : 'warn',
+        message: present ? `Set (${note})` : `Not set — ${note}`,
       })
     }
 
