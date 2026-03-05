@@ -126,22 +126,9 @@ export class ConductorChat {
       return
     }
 
-    // OAuth subscription mode: no API key available for direct chat completions.
-    // The CLI (codex exec / kimi --print) handles auth from credential files.
-    // For the conductor chat phase we can only do direct API calls, so inform the user.
+    // OAuth subscription mode: use CLI subprocess for chat (codex exec / kimi --print)
     if (!this.config.apiKey || this.config.apiKey === '__oauth_session__') {
-      yield {
-        type: 'text',
-        content: [
-          `${this.config.provider === 'openai' ? 'Codex' : 'Kimi'} is connected via subscription OAuth — great for running coding tasks.`,
-          '',
-          'For the planning chat, an API key is needed (the chat calls the API directly).',
-          'You can:',
-          '  • Type /run to start agents immediately (subscription credits used)',
-          '  • Or add an API key: metaclide connect --agent codex --key <key>',
-        ].join('\n'),
-      }
-      yield {type: 'done'}
+      yield* this.sendViaCLI(userMessage)
       return
     }
 
@@ -335,6 +322,83 @@ export class ConductorChat {
       yield {type: 'done'}
     } catch (err) {
       yield {type: 'error', content: err instanceof Error ? err.message : String(err)}
+    }
+  }
+
+  // ── CLI subprocess (OAuth subscription mode) ──
+
+  private async *sendViaCLI(userMessage: string): AsyncGenerator<StreamEvent> {
+    const {execa} = await import('execa')
+    const isCodex = this.config.provider === 'openai'
+    const cliName = isCodex ? 'codex' : 'kimi'
+
+    // Build the prompt with conductor system context + user message
+    const prompt = `${CONDUCTOR_SYSTEM}\n\n---\n\nUser: ${userMessage}`
+
+    try {
+      let args: string[]
+      if (isCodex) {
+        // Codex exec reads ~/.codex/auth.json for OAuth session
+        args = ['exec', prompt, '--json', '--full-auto', '--sandbox', 'workspace-write']
+      } else {
+        // Kimi reads ~/.kimi/credentials/kimi-code.json for OAuth session
+        args = ['--print', '-y', '-p', prompt, '--work-dir', this.config.repoRoot, '--output-format', 'stream-json']
+      }
+
+      const proc = execa(cliName, args, {
+        cwd: this.config.repoRoot,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        reject: false,
+      })
+
+      let buffer = ''
+      for await (const chunk of proc.iterable()) {
+        buffer += String(chunk)
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+
+        for (const line of lines) {
+          if (!line.trim()) continue
+          try {
+            const event = JSON.parse(line) as Record<string, unknown>
+
+            if (isCodex) {
+              // Codex NDJSON: extract text from item.updated agent_message
+              if (event.type === 'item.updated') {
+                const content = String(event.content ?? '')
+                if (content) yield {type: 'text', content}
+              } else if (event.type === 'error' || event.type === 'turn.failed') {
+                yield {type: 'error', content: String(event.message ?? event.error ?? 'Codex error')}
+              }
+            } else {
+              // Kimi JSONL: extract text from ContentPart/content events
+              const msgType = event.type as string
+              if (msgType === 'ContentPart' || msgType === 'content') {
+                const c = event.content as Record<string, unknown> | undefined
+                const text = String(c?.value ?? c?.text ?? event.value ?? event.text ?? '')
+                if (text) yield {type: 'text', content: text}
+              }
+              // Also handle raw assistant messages
+              if (event.role === 'assistant' && event.content) {
+                yield {type: 'text', content: String(event.content)}
+              }
+            }
+          } catch {
+            // Non-JSON line — treat as plain text output
+            if (line.trim()) yield {type: 'text', content: line}
+          }
+        }
+      }
+
+      await proc
+      yield {type: 'done'}
+    } catch (err) {
+      // CLI not installed — give clear instructions
+      const installCmd = isCodex ? 'npm install -g @openai/codex' : 'pip install kimi-cli'
+      yield {
+        type: 'error',
+        content: `${cliName} CLI not found. Install it: ${installCmd}`,
+      }
     }
   }
 

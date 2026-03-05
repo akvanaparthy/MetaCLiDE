@@ -5,6 +5,7 @@ import type {Capability, PeerMessage, PeerEvent, PeerStatusUpdate, PeerConfig} f
 import type {Peer} from './interface.js'
 import {PeerLogger} from '../logger/index.js'
 import {OrchManager} from '../orch/index.js'
+import {SessionStore} from '../orch/sessions.js'
 
 // International endpoint first; .cn as fallback
 const KIMI_BASE_URL = 'https://api.moonshot.ai/v1'
@@ -20,6 +21,7 @@ export class KimiPeer implements Peer {
 
   private logger: PeerLogger
   private orch: OrchManager
+  private sessions: SessionStore
 
   constructor(
     private readonly config: PeerConfig,
@@ -30,6 +32,7 @@ export class KimiPeer implements Peer {
     this.mode = config.mode === 'oauth' ? 'tool' : 'api'
     this.logger = new PeerLogger(repoRoot, config.id)
     this.orch = new OrchManager(repoRoot)
+    this.sessions = new SessionStore(repoRoot)
   }
 
   get id(): string { return this.config.id }
@@ -103,6 +106,7 @@ export class KimiPeer implements Peer {
     const prompt = this.buildPrompt(msg)
 
     const modelArgs = this.config.model ? ['-m', this.config.model] : []
+    const savedSessionId = this.sessions.getKimiSessionId(this.id)
     // Correct Kimi CLI flags for non-interactive mode
     const args = [
       '--print',         // non-interactive, auto-exit
@@ -111,6 +115,7 @@ export class KimiPeer implements Peer {
       '--work-dir', this.worktreePath,
       '--output-format', 'stream-json',
       ...modelArgs,
+      ...(savedSessionId ? ['--session', savedSessionId] : []),
     ]
 
     const env: Record<string, string> = {...(process.env as Record<string, string>)}
@@ -157,6 +162,10 @@ export class KimiPeer implements Peer {
   }
 
   private *mapKimiEvent(event: Record<string, unknown>, taskId?: string): Generator<PeerEvent> {
+    // Capture session ID if present (for resume across phases)
+    const sessionId = (event.session_id ?? event.sessionId) as string | undefined
+    if (sessionId) this.sessions.setKimiSessionId(this.id, sessionId)
+
     // Wire protocol JSON-RPC 2.0 format
     const method = event.method as string | undefined
     const params = event.params as Record<string, unknown> | undefined

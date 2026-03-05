@@ -9,6 +9,7 @@ export interface PeerSession {
   peerId: string
   claudeSessionId?: string
   codexThreadId?: string
+  kimiSessionId?: string
   lastUpdated: string
 }
 
@@ -51,6 +52,15 @@ export class SessionStore {
   setCodexThreadId(peerId: string, threadId: string): void {
     const existing = this.read(peerId) ?? {peerId, lastUpdated: ''}
     this.write({...existing, peerId, codexThreadId: threadId})
+  }
+
+  getKimiSessionId(peerId: string): string | undefined {
+    return this.read(peerId)?.kimiSessionId
+  }
+
+  setKimiSessionId(peerId: string, sessionId: string): void {
+    const existing = this.read(peerId) ?? {peerId, lastUpdated: ''}
+    this.write({...existing, peerId, kimiSessionId: sessionId})
   }
 
   clear(peerId: string): void {

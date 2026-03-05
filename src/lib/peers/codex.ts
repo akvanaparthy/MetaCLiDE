@@ -76,8 +76,8 @@ export class CodexPeer implements Peer {
 
     const modelArgs = this.config.model ? ['-m', this.config.model] : []
     const args = savedThreadId
-      ? ['exec', 'resume', savedThreadId, prompt, '--json', '--approval-policy', 'never', ...modelArgs]
-      : ['exec', prompt, '--json', '--approval-policy', 'never', '--sandbox', 'workspace-write', ...modelArgs]
+      ? ['exec', 'resume', savedThreadId, prompt, '--json', '--full-auto', '--sandbox', 'workspace-write', ...modelArgs]
+      : ['exec', prompt, '--json', '--full-auto', '--sandbox', 'workspace-write', ...modelArgs]
 
     const env: Record<string, string> = {...(process.env as Record<string, string>)}
 
