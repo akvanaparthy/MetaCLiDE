@@ -9,7 +9,8 @@ import {VerificationGates} from '../gates/index.js'
 import {PeerFactory} from '../peers/factory.js'
 import {WorktreeManager} from '../git/worktree.js'
 import {SessionLogger} from '../logger/index.js'
-import type {PeerConfig, Task, PlanFile, GateResult, GateResults, ChangeRequest} from '../../types.js'
+import {Router} from '../router/index.js'
+import type {PeerConfig, Task, PlanFile, GateResult, GateResults, ChangeRequest, BudgetConfig} from '../../types.js'
 import type {Peer} from '../peers/interface.js'
 import type {PeerEvent} from '../../types.js'
 
@@ -34,6 +35,7 @@ export interface RunnerOptions {
   skipPlanning?: boolean
   skipReview?: boolean
   stack?: string
+  budget?: BudgetConfig
 }
 
 const MAX_FIX = 5
@@ -236,12 +238,26 @@ export class OrchestrationRunner {
       fs.writeFileSync(path.join(worktreePaths[peer.id], peer.contextFile), ctx)
     }
 
-    // Instantiate peers
+    // Instantiate peers + budget router
     const peers = new Map<string, Peer>()
     for (const cfg of selectedPeers) {
       peers.set(cfg.id, PeerFactory.create(cfg, repoRoot, worktreePaths[cfg.id]))
     }
     const conductorPeer = peers.get(conductor.id)!
+    const router = new Router(selectedPeers, opts.budget)
+
+    // Helper: track cost from peer events via the router
+    function* trackCost(event: OrchEvent): Generator<OrchEvent> {
+      if (event.type === 'peer_event' && event.peerEvent.type === 'result') {
+        const cost = event.peerEvent.costUsd ?? 0
+        const turns = event.peerEvent.turns ?? 0
+        if (cost > 0) {
+          const cfg = selectedPeers.find(p => p.id === event.peerId)
+          if (cfg) router.recordUsage(cfg.id, cfg.provider, cost, turns)
+        }
+      }
+      yield event
+    }
 
     // ── Phase 1: Discussion (implementers in parallel) ──
     if (!opts.skipPlanning && implementers.length > 0) {
@@ -260,7 +276,7 @@ export class OrchestrationRunner {
         })()
       })
 
-      for await (const e of fanIn(discussIters)) yield e
+      for await (const e of fanIn(discussIters)) yield* trackCost(e)
 
       // ── Phase 2: Planning (conductor) ──
       yield {type: 'phase', phase: 'planning', message: 'Phase 2: Planning'}
@@ -298,7 +314,7 @@ plan.json format:
 Create ALL files. Be thorough — these contracts are the source of truth for the entire session.`
 
       for await (const e of conductorPeer.send({type: 'plan', content: planPrompt})) {
-        yield {type: 'peer_event', peerId: conductor.id, displayName: conductor.displayName, peerEvent: e}
+        yield* trackCost({type: 'peer_event', peerId: conductor.id, displayName: conductor.displayName, peerEvent: e})
       }
     } else if (!opts.skipPlanning) {
       // Conductor-only session, no discussion
@@ -315,7 +331,7 @@ ${opts.stack ?? 'Determine from brief'}
 Create the canonical contracts (api.openapi.yaml, pages.routes.json, entities.schema.json, types.ts, decisions.md) and plan.json in .orch/. Set VERSION to 1.`
 
       for await (const e of conductorPeer.send({type: 'plan', content: planPrompt})) {
-        yield {type: 'peer_event', peerId: conductor.id, displayName: conductor.displayName, peerEvent: e}
+        yield* trackCost({type: 'peer_event', peerId: conductor.id, displayName: conductor.displayName, peerEvent: e})
       }
     } else {
       yield {type: 'log', message: 'Skipping planning (contracts exist)'}
@@ -334,7 +350,7 @@ Create the canonical contracts (api.openapi.yaml, pages.routes.json, entities.sc
         return peerReview(peer, cfg, contractContent, version, contractHash, orch)
       })
 
-      for await (const e of fanIn(reviewIters)) yield e
+      for await (const e of fanIn(reviewIters)) yield* trackCost(e)
     }
 
     // ── Phase 4: Lock ──
@@ -367,7 +383,7 @@ Create the canonical contracts (api.openapi.yaml, pages.routes.json, entities.sc
         return peerImplement(peer, cfg, tasks, contractContent, worktreePaths[cfg.id], wm)
       })
 
-      for await (const e of fanIn(implIters)) yield e
+      for await (const e of fanIn(implIters)) yield* trackCost(e)
 
       // Check for CRs filed during implementation
       const newCRs = orch.listChangeRequests().filter(cr => !knownCRIds.has(cr.id) && cr.status === 'pending')
@@ -443,11 +459,19 @@ If accepted, update the relevant contract files.`
         return peerFix(peer, cfg, failingGates, fixIter, worktreePaths[peer.id], wm)
       })
 
-      for await (const e of fanIn(fixIters)) yield e
+      for await (const e of fanIn(fixIters)) yield* trackCost(e)
 
-      // Re-merge after fixes
-      for (const peer of fixTargets) {
-        try { await wm.mergePeerBranch(peer.id) } catch { /* conflicts handled on next gate run */ }
+      // Reset integration branch and re-merge all peers cleanly
+      try {
+        await wm.createIntegrationBranch()  // resets to main
+        for (const p of selectedPeers) {
+          const {success, conflicts} = await wm.mergePeerBranch(p.id)
+          if (!success) {
+            yield {type: 'log', level: 'warn', message: `  Conflicts in agent/${p.id}: ${conflicts.join(', ')}`} satisfies OrchEvent
+          }
+        }
+      } catch (err) {
+        yield {type: 'log', level: 'warn', message: `Re-merge error: ${err}`} satisfies OrchEvent
       }
     } while (fixIter < MAX_FIX)
 
@@ -460,6 +484,13 @@ If accepted, update the relevant contract files.`
     validator.writeIntegrationReport(gateResults as unknown as Record<string, string>, mismatches, fixIter)
 
     for (const peer of peers.values()) await peer.shutdown()
+
+    // Emit cost summary
+    const costSummary = router.summary()
+    if (costSummary.totalCost > 0) {
+      const byPeer = Object.entries(costSummary.byPeer).map(([id, c]) => `${id}: $${c.toFixed(4)}`).join(', ')
+      yield {type: 'log', message: `Cost summary: $${costSummary.totalCost.toFixed(4)} total (${byPeer})`}
+    }
 
     yield {type: 'phase', phase: 'deliver', message: 'Phase 7: Done'}
     yield {type: 'complete'}

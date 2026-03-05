@@ -241,17 +241,55 @@ src/
 
 ---
 
+## Session: 2026-03-03
+
+### Bug Fixes (P0-P2) from Codebase Audit
+- Fixed CodexPeer: wrong CLI flag `--approval-policy never` → `--full-auto`
+- Fixed AgenticApiPeer: baseURL operator precedence bug
+- Fixed conductor chat: OAuth subscribers couldn't chat (added sendViaCLI method)
+- Fixed PeerFactory: OAuth without CLI now throws clear error with install instructions
+- Fixed Codex resume path: added `--sandbox workspace-write`
+- Fixed KimiPeer: added SessionStore integration for session persistence across phases
+- Fixed ConductorSelect: misleading labels for OAuth/BYOK modes
+- Added provider-specific cost estimation (Anthropic/OpenAI/Moonshot rates)
+- Wired Router budget enforcement into OrchestrationRunner
+- Fixed Codex NDJSON event parser: handles both flat and nested item formats
+- `@anthropic-ai/claude-agent-sdk@^0.2.63` installed (replaces deprecated `claude-code`)
+
+## Session: 2026-03-04
+
+### Fixes
+- Fixed conductor CLI subprocess chat: tool calls (save_brief) now work by extracting structured brief content from CLI output instead of relying on custom tools that CLI agents don't have
+- Fixed Codex conductor streaming: computes text deltas instead of re-emitting accumulated text
+- Fixed runner fix-loop: merge conflicts now handled properly — resets integration branch and re-merges all peers cleanly instead of trying to merge on top of failed merge state
+
+### Testing
+- Set up vitest with `vitest.config.ts`
+- 6 test files, 44 tests, all passing:
+  - `orch-manager.test.ts` (12 tests) — init, brief, peers, plan, status, CRs, model updates
+  - `contract-lock.test.ts` (6 tests) — lock/unlock, hash determinism, peer ACK validation
+  - `contract-validator.test.ts` (4 tests) — schema mismatches, missing interfaces, integration report
+  - `router.test.ts` (9 tests) — usage tracking, budget enforcement, peer selection, cost summary
+  - `session-store.test.ts` (7 tests) — CRUD for Claude/Codex/Kimi session IDs
+  - `peer-factory.test.ts` (6 tests) — routing by provider, baseURL, plugin proxy
+
+### Status Update
+- **Mismatch detectors**: Fully implemented (not stubs) — API, schema, route, DB
+- **Session persistence**: TUI sessions at `~/.metaclide/sessions/`, peer sessions in `.orch/sessions/`
+- **36 source files**, all building clean
+
+---
+
 ## Remaining / TODO
 
-### MVP 3.1 (Session Persistence)
-- [ ] JSONL session persistence with resume support
+### Core Flow
+- [ ] End-to-end test with real agents (init → chat → /run → orchestration)
+- [ ] Session crash recovery (resume from last known state on unexpected exit)
 
-### MVP 4 (N-Peer + Mismatch Detection)
-- [ ] `metaclide doctor` — add `npm install` / `yarn` check
+### Polish
 - [ ] PR export improvements (richer body with task summary)
+- [ ] BYOK peer agent (MetaCLiDE as its own coding agent, Kilo-style — later feature)
 
 ### Known Issues / Notes
-- `@anthropic-ai/claude-code` package name may change — check Anthropic's npm registry
 - `keytar` requires native build tools on Windows; fallback file storage is used automatically
-- `contracts/lock.ts` uses `require('node:path')` which is CJS — fix to `import` for ESM purity
 - Codex CLI subprocess output format depends on `codex` version — may need adjustment

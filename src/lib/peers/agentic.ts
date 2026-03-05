@@ -454,10 +454,14 @@ export class AgenticApiPeer implements Peer {
   }
 
   private estimateCost(inputTokens: number, outputTokens: number): number {
-    // Approximate pricing — overridden by config if known
-    const inputRate = 0.0000015   // $1.50/M input (gpt-4o-mini scale default)
-    const outputRate = 0.000006   // $6/M output
-    return inputTokens * inputRate + outputTokens * outputRate
+    // Provider-specific pricing (per token, approximate March 2026)
+    const rates: Record<string, {input: number; output: number}> = {
+      anthropic: {input: 0.000003, output: 0.000015},     // Claude Sonnet ~$3/$15 per M
+      openai:    {input: 0.0000015, output: 0.000006},     // gpt-4o-mini ~$1.50/$6 per M
+      moonshot:  {input: 0.0000006, output: 0.0000025},    // Kimi ~$0.60/$2.50 per M
+    }
+    const r = rates[this.config.provider] ?? rates.openai
+    return inputTokens * r.input + outputTokens * r.output
   }
 
   private defaultModel(): string {

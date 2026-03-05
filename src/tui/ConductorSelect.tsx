@@ -34,30 +34,30 @@ export function ConductorSelect({onSelect}: ConductorSelectProps) {
     // ── Codex / OpenAI subscription ──
     {
       label: codexSubscription
-        ? `● Codex  ✓ subscription connected  │ o4-mini  │ ${clis['codex'] ? 'CLI agent' : 'API loop'}  — /run to start`
-        : `○ Codex  (ChatGPT subscription login)  │ o4-mini  │ uses Plus/Pro credits`,
+        ? `● Codex  ✓ subscription  │ o4-mini  │ ${clis['codex'] ? 'CLI agent ready' : '⚠ codex CLI not installed'}`
+        : `○ Codex  (ChatGPT Plus/Pro login)  │ o4-mini  │ ${clis['codex'] ? 'CLI available' : 'needs codex CLI'}`,
       value: {provider: 'openai', mode: 'oauth', displayName: 'Codex'},
     },
 
     // ── Codex BYOK ──
     {
       label: codexApiKey
-        ? `● Codex / OpenAI  ✓ API key  │ o4-mini  │ chat + agents`
-        : `○ Codex / OpenAI  (API key)  │ o4-mini  │ chat + agents`,
+        ? `● Codex / OpenAI  ✓ API key  │ o4-mini  │ ${clis['codex'] ? 'CLI agent' : 'agentic API'}`
+        : `○ Codex / OpenAI  (API key)  │ o4-mini  │ ${clis['codex'] ? 'CLI agent' : 'agentic API'}`,
       value: {provider: 'openai', mode: 'byok', displayName: 'Codex'},
     },
 
     // ── Kimi subscription ──
     {
       label: kimiSubscription
-        ? `● Kimi Code  ✓ subscription connected  │ kimi-k2-thinking-turbo  │ ${clis['kimi'] ? 'CLI agent' : 'API loop'}`
-        : `○ Kimi Code  (subscription login)  │ kimi-k2-thinking-turbo  │ Kimi Code credits`,
+        ? `● Kimi Code  ✓ subscription  │ kimi-k2-thinking-turbo  │ ${clis['kimi'] ? 'CLI agent ready' : '⚠ kimi CLI not installed'}`
+        : `○ Kimi Code  (subscription login)  │ kimi-k2-thinking-turbo  │ ${clis['kimi'] ? 'CLI available' : 'needs kimi CLI'}`,
       value: {provider: 'moonshot', mode: 'oauth', displayName: 'Kimi'},
     },
 
     // ── Kimi BYOK ──
     {
-      label: `○ Kimi / Moonshot  (API key)  │ kimi-k2-thinking-turbo  │ chat + agents`,
+      label: `○ Kimi / Moonshot  (API key)  │ kimi-k2-thinking-turbo  │ ${clis['kimi'] ? 'CLI agent' : 'agentic API'}`,
       value: {provider: 'moonshot', mode: 'byok', displayName: 'Kimi'},
     },
   ]

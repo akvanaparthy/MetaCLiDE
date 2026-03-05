@@ -141,24 +141,29 @@ export class CodexPeer implements Peer {
     const type = event.type as string
 
     if (type === 'thread.started') {
-      const tid = event.thread_id as string | undefined
+      // thread_id may be at top level or inside event
+      const tid = (event.thread_id ?? event.threadId) as string | undefined
       if (tid) this.sessions.setCodexThreadId(this.id, tid)
       return
     }
 
+    // Codex events may have item data at top level (item_id, item_type)
+    // OR nested inside an `item` object — handle both formats
+    const item = event.item as Record<string, unknown> | undefined
+    const itemId = (event.item_id ?? item?.id) as string | undefined
+    const itemType = (event.item_type ?? item?.type) as string | undefined
+
     if (type === 'item.started') {
-      const id = event.item_id as string
-      const itemType = event.item_type as string
-      if (id && itemType) itemTypes.set(id, itemType)
+      if (itemId && itemType) itemTypes.set(itemId, itemType)
       return
     }
 
     if (type === 'item.updated') {
-      const id = event.item_id as string
-      const iType = itemTypes.get(id) ?? ''
+      const id = itemId ?? ''
+      const iType = itemTypes.get(id) ?? itemType ?? ''
       if (iType === 'agent_message' || iType === 'reasoning') {
         // Codex sends accumulated text; compute delta
-        const full = String(event.content ?? '')
+        const full = String(event.content ?? item?.text ?? '')
         const prev = itemText.get(id) ?? ''
         const delta = full.length > prev.length ? full.slice(prev.length) : ''
         if (delta) {
@@ -171,27 +176,28 @@ export class CodexPeer implements Peer {
     }
 
     if (type === 'item.completed') {
-      const iType = event.item_type as string
+      const iType = itemType ?? itemTypes.get(itemId ?? '') ?? ''
       if (iType === 'file_change') {
-        const toolInput = {path: event.path, operation: event.operation}
+        const toolInput = {path: event.path ?? item?.path, operation: event.operation ?? item?.operation}
         this.logger.append({type: 'tool_use', toolName: 'file_change', toolInput, taskId})
         yield {type: 'tool_use', toolName: 'file_change', toolInput}
-      } else if (iType === 'command_execution') {
-        const toolInput = {command: event.command}
+      } else if (iType === 'command_execution' || iType === 'command') {
+        const toolInput = {command: event.command ?? item?.command}
         this.logger.append({type: 'tool_use', toolName: 'command', toolInput, taskId})
         yield {type: 'tool_use', toolName: 'command', toolInput}
       } else if (iType === 'mcp_tool_call') {
-        const toolInput = {name: event.name, input: event.input}
-        yield {type: 'tool_use', toolName: String(event.name ?? 'mcp'), toolInput}
+        const name = event.name ?? item?.name
+        const input = event.input ?? item?.input
+        yield {type: 'tool_use', toolName: String(name ?? 'mcp'), toolInput: {name, input}}
       }
       return
     }
 
     if (type === 'turn.completed') {
       const usage = event.usage as {input_tokens?: number; output_tokens?: number} | undefined
-      // Pricing: $0.0000015/input token, $0.000006/output token (gpt-4o-mini scale)
+      // Codex default model pricing (o4-mini: ~$1.10/$4.40 per M tokens)
       const costUsd = usage
-        ? ((usage.input_tokens ?? 0) * 0.0000015 + (usage.output_tokens ?? 0) * 0.000006)
+        ? ((usage.input_tokens ?? 0) * 0.0000011 + (usage.output_tokens ?? 0) * 0.0000044)
         : 0
       this.logger.append({type: 'result', content: '', costUsd, turns: 1, taskId})
       yield {type: 'result', content: '', costUsd, turns: 1}

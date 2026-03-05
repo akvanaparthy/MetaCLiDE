@@ -326,22 +326,44 @@ export class ConductorChat {
   }
 
   // ── CLI subprocess (OAuth subscription mode) ──
+  //
+  // CLI agents (Codex, Kimi) have their OWN tool sets (file edit, bash, etc.)
+  // and don't know about our conductor tools (save_brief, etc.). So we:
+  // 1. Ask the LLM to just respond conversationally (no tool calls)
+  // 2. Parse the response for brief content and save it ourselves
+  // 3. Compute deltas for Codex (sends accumulated text, not deltas)
 
   private async *sendViaCLI(userMessage: string): AsyncGenerator<StreamEvent> {
     const {execa} = await import('execa')
     const isCodex = this.config.provider === 'openai'
     const cliName = isCodex ? 'codex' : 'kimi'
 
-    // Build the prompt with conductor system context + user message
-    const prompt = `${CONDUCTOR_SYSTEM}\n\n---\n\nUser: ${userMessage}`
+    // CLI-specific system prompt: no tool calls, just conversational output.
+    // We extract brief content from the response ourselves.
+    const cliSystem = `You are the Conductor agent in MetaCLiDE — a multi-agent coding orchestration system.
+
+Your job is to understand what the user wants to build, then respond with a clear project brief.
+
+RULES:
+1. When the user describes what they want to build, respond with the project brief in this format:
+   ---BRIEF---
+   # ProjectName
+   ## Requirements
+   (what should be built)
+   ## Tech Stack
+   (technologies to use)
+   ---END---
+2. After the brief block, add a short confirmation message.
+3. Be concise. Accept whatever the user says naturally.
+4. If the user asks questions or wants to refine, respond normally.`
+
+    const prompt = `${cliSystem}\n\n---\n\nUser: ${userMessage}`
 
     try {
       let args: string[]
       if (isCodex) {
-        // Codex exec reads ~/.codex/auth.json for OAuth session
         args = ['exec', prompt, '--json', '--full-auto', '--sandbox', 'workspace-write']
       } else {
-        // Kimi reads ~/.kimi/credentials/kimi-code.json for OAuth session
         args = ['--print', '-y', '-p', prompt, '--work-dir', this.config.repoRoot, '--output-format', 'stream-json']
       }
 
@@ -352,6 +374,10 @@ export class ConductorChat {
       })
 
       let buffer = ''
+      let fullText = ''
+      // For Codex: track accumulated text per item to compute deltas
+      const itemText = new Map<string, string>()
+
       for await (const chunk of proc.iterable()) {
         buffer += String(chunk)
         const lines = buffer.split('\n')
@@ -363,37 +389,57 @@ export class ConductorChat {
             const event = JSON.parse(line) as Record<string, unknown>
 
             if (isCodex) {
-              // Codex NDJSON: extract text from item.updated agent_message
-              if (event.type === 'item.updated') {
-                const content = String(event.content ?? '')
-                if (content) yield {type: 'text', content}
-              } else if (event.type === 'error' || event.type === 'turn.failed') {
+              const type = event.type as string
+              if (type === 'item.updated') {
+                const item = event.item as Record<string, unknown> | undefined
+                const itemId = String(event.item_id ?? item?.id ?? '')
+                const itemType = String(event.item_type ?? item?.type ?? '')
+                if (itemType === 'agent_message' || itemType === 'reasoning') {
+                  const accumulated = String(event.content ?? item?.text ?? '')
+                  const prev = itemText.get(itemId) ?? ''
+                  const delta = accumulated.length > prev.length ? accumulated.slice(prev.length) : ''
+                  if (delta) {
+                    itemText.set(itemId, accumulated)
+                    fullText += delta
+                    yield {type: 'text', content: delta}
+                  }
+                }
+              } else if (type === 'error' || type === 'turn.failed') {
                 yield {type: 'error', content: String(event.message ?? event.error ?? 'Codex error')}
               }
             } else {
-              // Kimi JSONL: extract text from ContentPart/content events
+              // Kimi JSONL
               const msgType = event.type as string
               if (msgType === 'ContentPart' || msgType === 'content') {
                 const c = event.content as Record<string, unknown> | undefined
                 const text = String(c?.value ?? c?.text ?? event.value ?? event.text ?? '')
-                if (text) yield {type: 'text', content: text}
+                if (text) { fullText += text; yield {type: 'text', content: text} }
               }
-              // Also handle raw assistant messages
               if (event.role === 'assistant' && event.content) {
-                yield {type: 'text', content: String(event.content)}
+                const text = String(event.content)
+                fullText += text
+                yield {type: 'text', content: text}
               }
             }
           } catch {
-            // Non-JSON line — treat as plain text output
-            if (line.trim()) yield {type: 'text', content: line}
+            if (line.trim()) { fullText += line; yield {type: 'text', content: line} }
           }
         }
       }
 
       await proc
+
+      // Extract and save brief from the response
+      const briefMatch = fullText.match(/---BRIEF---\s*([\s\S]*?)\s*---END---/)
+      if (briefMatch) {
+        const briefContent = briefMatch[1].trim()
+        this.config.orch.writeBrief(briefContent)
+        yield {type: 'tool_start', toolName: 'save_brief'}
+        yield {type: 'tool_done', toolName: 'save_brief', content: 'Brief saved'}
+      }
+
       yield {type: 'done'}
     } catch (err) {
-      // CLI not installed — give clear instructions
       const installCmd = isCodex ? 'npm install -g @openai/codex' : 'pip install kimi-cli'
       yield {
         type: 'error',
