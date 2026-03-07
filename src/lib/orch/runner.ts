@@ -285,38 +285,15 @@ export class OrchestrationRunner {
         .map(([id, resp]) => `## ${id}\n${resp}`)
         .join('\n\n')
 
-      const planPrompt = `You are the Conductor. Respond with a JSON plan and contracts for this project.
+      const planPrompt = `OUTPUT ONLY RAW JSON. No markdown, no explanation, no code fences. Just a JSON object.
 
-## Project Brief
-${brief}
+Project: ${brief.split('\n').slice(0, 3).join(' ')}
+Stack: ${opts.stack ?? 'Determine from brief'}
+Peers: ${peerInput || '(none)'}
+Team: ${implementers.map(p => `${p.id} (${p.role})`).join(', ')}
 
-## Tech Stack
-${opts.stack ?? 'Determine from the brief'}
-
-## Peer Discussion
-${peerInput || '(No peer input)'}
-
-## Your Team
-${implementers.map(p => `- ${p.displayName} (${p.id}): ${p.role}`).join('\n')}
-
-## IMPORTANT: Response Format
-You MUST respond with a single JSON code block containing the plan. Use this exact format:
-
-\`\`\`json
-{
-  "version": 1,
-  "project": "<name>",
-  "decisions": "<key architecture decisions as a string>",
-  "tasks": [
-    {"id": "task-001", "title": "...", "owner": "<peer-id>", "status": "pending", "phase": "implement", "dependencies": [], "acceptance": "..."},
-    {"id": "task-002", "title": "...", "owner": "<peer-id>", "status": "pending", "phase": "implement", "dependencies": ["task-001"], "acceptance": "..."}
-  ]
-}
-\`\`\`
-
-Assign tasks to these peer IDs: ${implementers.map(p => p.id).join(', ')}
-Each task must have: id, title, owner (peer id), status "pending", phase "implement", dependencies (array of task ids), acceptance (criteria string).
-Respond ONLY with the JSON block.`
+Return this exact JSON structure (nothing else):
+{"version":1,"project":"NAME","tasks":[{"id":"task-001","title":"WHAT","owner":"PEER_ID","status":"pending","phase":"implement","dependencies":[],"acceptance":"CRITERIA"}]}`
 
       let planText = ''
       for await (const e of conductorPeer.send({type: 'plan', content: planPrompt})) {
@@ -325,7 +302,14 @@ Respond ONLY with the JSON block.`
       }
 
       // Extract plan JSON from conductor's response
-      const jsonMatch = planText.match(/```json\s*([\s\S]*?)\s*```/) ?? planText.match(/(\{[\s\S]*"tasks"[\s\S]*\})/)
+      // Try to extract JSON: bare JSON, code-fenced, or regex fallback
+      let jsonMatch: RegExpMatchArray | null = null
+      try {
+        JSON.parse(planText.trim())
+        jsonMatch = [planText.trim(), planText.trim()]
+      } catch {
+        jsonMatch = planText.match(/```(?:json)?\s*([\s\S]*?)\s*```/) ?? planText.match(/(\{[\s\S]*"tasks"[\s\S]*\})/)
+      }
       if (jsonMatch) {
         try {
           const raw = JSON.parse(jsonMatch[1]) as Record<string, unknown>
