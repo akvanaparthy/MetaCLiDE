@@ -74,6 +74,7 @@ export class OrchManager {
   }
 
   writePeerStatus(status: PeerStatus): void {
+    fs.mkdirSync(this.paths.status, {recursive: true})
     const p = path.join(this.paths.status, `${status.peer}.json`)
     fs.writeFileSync(p, JSON.stringify(status, null, 2))
   }
