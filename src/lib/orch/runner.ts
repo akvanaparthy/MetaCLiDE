@@ -285,7 +285,7 @@ export class OrchestrationRunner {
         .map(([id, resp]) => `## ${id}\n${resp}`)
         .join('\n\n')
 
-      const planPrompt = `You are the Conductor. Create the canonical contracts and task plan.
+      const planPrompt = `You are the Conductor. Respond with a JSON plan and contracts for this project.
 
 ## Project Brief
 ${brief}
@@ -299,22 +299,53 @@ ${peerInput || '(No peer input)'}
 ## Your Team
 ${implementers.map(p => `- ${p.displayName} (${p.id}): ${p.role}`).join('\n')}
 
-## Required Files
-1. .orch/contracts/api.openapi.yaml — OpenAPI 3.0 spec
-2. .orch/contracts/pages.routes.json — frontend routes
-3. .orch/contracts/entities.schema.json — data models (JSON Schema)
-4. .orch/contracts/types.ts — shared TypeScript interfaces
-5. .orch/contracts/decisions.md — architecture decisions
-6. .orch/plan.json — task graph
-7. .orch/contracts/VERSION — set to "1"
+## IMPORTANT: Response Format
+You MUST respond with a single JSON code block containing the plan. Use this exact format:
 
-plan.json format:
-{"version":1,"project":"<name>","tasks":[{"id":"task-001","title":"...","owner":"<peer-id>","status":"pending","phase":"implement","dependencies":[],"acceptance":"..."}]}
+\`\`\`json
+{
+  "version": 1,
+  "project": "<name>",
+  "decisions": "<key architecture decisions as a string>",
+  "tasks": [
+    {"id": "task-001", "title": "...", "owner": "<peer-id>", "status": "pending", "phase": "implement", "dependencies": [], "acceptance": "..."},
+    {"id": "task-002", "title": "...", "owner": "<peer-id>", "status": "pending", "phase": "implement", "dependencies": ["task-001"], "acceptance": "..."}
+  ]
+}
+\`\`\`
 
-Create ALL files. Be thorough — these contracts are the source of truth for the entire session.`
+Assign tasks to these peer IDs: ${implementers.map(p => p.id).join(', ')}
+Each task must have: id, title, owner (peer id), status "pending", phase "implement", dependencies (array of task ids), acceptance (criteria string).
+Respond ONLY with the JSON block.`
 
+      let planText = ''
       for await (const e of conductorPeer.send({type: 'plan', content: planPrompt})) {
+        if (e.type === 'text') planText += e.content ?? ''
         yield* trackCost({type: 'peer_event', peerId: conductor.id, displayName: conductor.displayName, peerEvent: e})
+      }
+
+      // Extract plan JSON from conductor's response
+      const jsonMatch = planText.match(/```json\s*([\s\S]*?)\s*```/) ?? planText.match(/(\{[\s\S]*"tasks"[\s\S]*\})/)
+      if (jsonMatch) {
+        try {
+          const plan = JSON.parse(jsonMatch[1]) as PlanFile & {decisions?: string}
+          // Write plan.json
+          const planPath = path.join(repoRoot, '.orch', 'plan.json')
+          fs.writeFileSync(planPath, JSON.stringify(plan, null, 2))
+          yield {type: 'log', message: `✓ Plan created: ${plan.tasks?.length ?? 0} tasks`}
+
+          // Write minimal contracts
+          const contractsDir = path.join(repoRoot, '.orch', 'contracts')
+          fs.mkdirSync(contractsDir, {recursive: true})
+          fs.writeFileSync(path.join(contractsDir, 'VERSION'), String(plan.version ?? 1))
+          if (plan.decisions) {
+            fs.writeFileSync(path.join(contractsDir, 'decisions.md'), String(plan.decisions))
+          }
+        } catch (err) {
+          yield {type: 'log', level: 'warn', message: `Could not parse plan JSON: ${err}`}
+        }
+      } else {
+        yield {type: 'log', level: 'warn', message: 'Conductor did not return a JSON plan block'}
       }
     } else if (!opts.skipPlanning) {
       // Conductor-only session, no discussion
