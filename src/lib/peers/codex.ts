@@ -259,9 +259,9 @@ export class CodexPeer implements Peer {
       `[METACLIDE — ${msg.type.toUpperCase()} PHASE]`,
       `You are ${this.config.displayName} (id: ${this.id}), role: ${this.role}`,
       `Worktree: ${this.worktreePath}`,
-      `Contracts (READ-ONLY): ${this.repoRoot}/.orch/contracts/`,
+      `Orchestration root: ${this.repoRoot}/.orch/`,
       '',
-      'RULES: Never modify .orch/contracts/ — file a CR instead.',
+      'RULES: Contracts are provided inline — do not modify contract files. File a CR instead.',
       'Commit frequently. Work only inside your worktree.',
     ].join('\n')
 

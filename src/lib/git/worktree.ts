@@ -3,18 +3,14 @@ import path from 'node:path'
 import {simpleGit, SimpleGit} from 'simple-git'
 import {worktreePath as wtp} from '../orch/paths.js'
 
-function symlinkOrch(repoRoot: string, wtPath: string): void {
-  const orchLink = path.join(wtPath, '.orch')
-  if (fs.existsSync(orchLink)) return
+// Write a small .orch-root file so agents can find the real .orch directory
+// without creating a recursive junction (.orch/worktrees/<peer>/.orch → .orch → infinite)
+function writeOrchPointer(repoRoot: string, wtPath: string): void {
+  const pointerPath = path.join(wtPath, '.orch-root')
+  if (fs.existsSync(pointerPath)) return
   const orchSrc = path.join(repoRoot, '.orch')
   if (!fs.existsSync(orchSrc)) return
-  // 'junction' works on both Windows and Unix for directories
-  try {
-    fs.symlinkSync(orchSrc, orchLink, 'junction')
-  } catch {
-    // If junction fails (non-Windows), try regular symlink
-    try { fs.symlinkSync(orchSrc, orchLink) } catch { /* non-fatal */ }
-  }
+  fs.writeFileSync(pointerPath, orchSrc)
 }
 
 export class WorktreeManager {
@@ -44,7 +40,7 @@ export class WorktreeManager {
       await this.git.raw(['worktree', 'add', '-b', branch, wtPath, mainBranch])
     }
 
-    symlinkOrch(this.repoRoot, wtPath)
+    writeOrchPointer(this.repoRoot, wtPath)
     return wtPath
   }
 

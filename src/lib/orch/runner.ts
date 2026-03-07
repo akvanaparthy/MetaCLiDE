@@ -269,21 +269,19 @@ async function* peerImplement(
 
   const taskList = tasks.map(t => `- [${t.id}] ${t.title}\n  Acceptance: ${t.acceptance}`).join('\n')
 
-  const prompt = `Implement your assigned tasks. Stay inside your worktree. Do NOT modify .orch/contracts/.
+  const prompt = `Implement your assigned tasks. Work ONLY inside your worktree directory.
 
 ## Your Tasks
 ${taskList}
 
-## Contracts (READ-ONLY)
+## Contracts (READ-ONLY reference)
 ${contractContent}
 
 ## Instructions
-1. Implement each task following contracts exactly
+1. Implement each task following the contracts above exactly
 2. Commit after each task: git commit -m "[${cfg.id}] task-id: description"
 3. Run tests if available
-4. Update .orch/status/${cfg.id}.json when done
-
-If a contract is insufficient, write .orch/change-requests/CR-<id>.json and STOP work on affected areas.`
+4. If a contract is wrong or insufficient, include a note starting with "CR:" in your response`
 
   for await (const e of peer.send({type: 'implement', content: prompt})) {
     yield {type: 'peer_event', peerId: cfg.id, displayName: cfg.displayName, peerEvent: e} satisfies OrchEvent
@@ -309,7 +307,7 @@ ${failingGates}
 
 ## Instructions
 - Fix only files in your worktree
-- Do NOT modify .orch/contracts/
+- Do NOT modify contract files
 - Run the failing commands to confirm your fix
 - Commit your changes`
 
@@ -491,9 +489,8 @@ Create the canonical contracts (api.openapi.yaml, pages.routes.json, entities.sc
 ## CR
 ${JSON.stringify(cr, null, 2)}
 
-Decide: ACCEPT (update contracts, bump VERSION) or REJECT (explain why).
-Update .orch/change-requests/${cr.id}.json with your resolution.
-If accepted, update the relevant contract files.`
+Decide: ACCEPT or REJECT (explain why).
+Respond with your decision and reasoning.`
 
         for await (const e of conductorPeer.send({type: 'review', content: crPrompt})) {
           yield {type: 'peer_event', peerId: conductor.id, displayName: conductor.displayName, peerEvent: e}
@@ -603,10 +600,10 @@ function buildContextFile(peer: PeerConfig, repoRoot: string, brief: string, pee
 You are **${peer.id}** (${peer.role}) in a MetaCLiDE multi-agent session.
 
 ## Invariants
-1. Contracts in \`.orch/contracts/\` are truth — never modify them directly
-2. Only the Conductor may edit contracts
+1. Contracts are provided inline in prompts — never modify them directly
+2. Only the Conductor may update contracts
 3. All peers must ACK contracts before coding begins
-4. File a Change Request (CR) to propose contract changes
+4. To propose contract changes, include "CR:" in your response
 5. Work only within your git worktree
 6. Commit frequently with descriptive messages
 
@@ -617,12 +614,6 @@ ${brief}
 \`\`\`json
 ${peersJson}
 \`\`\`
-
-## File Locations
-- Contracts: \`.orch/contracts/\` (symlinked into your worktree as \`.orch\`)
-- Your status: \`.orch/status/${peer.id}.json\`
-- Change Requests: \`.orch/change-requests/\`
-- Discussion threads: \`.orch/threads/\`
 `
 }
 
