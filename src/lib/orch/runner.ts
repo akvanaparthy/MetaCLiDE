@@ -1,6 +1,7 @@
 // OrchestrationRunner — 6-phase pipeline as an async-generator event stream.
 // Used by both `metaclide run` (CLI) and the TUI orchestrating phase.
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import {OrchManager} from './index.js'
 import {ContractLock} from '../contracts/lock.js'
@@ -39,6 +40,104 @@ export interface RunnerOptions {
 }
 
 const MAX_FIX = 5
+
+// Plan schema for structured output via codex exec --output-schema
+const PLAN_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    version: {type: 'integer' as const},
+    project: {type: 'string' as const},
+    tasks: {
+      type: 'array' as const,
+      items: {
+        type: 'object' as const,
+        properties: {
+          id: {type: 'string' as const},
+          title: {type: 'string' as const},
+          owner: {type: 'string' as const},
+          acceptance: {type: 'string' as const},
+          dependencies: {type: 'array' as const, items: {type: 'string' as const}},
+        },
+        required: ['id', 'title', 'owner', 'acceptance', 'dependencies'] as const,
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['version', 'project', 'tasks'] as const,
+  additionalProperties: false,
+}
+
+async function generatePlan(
+  conductor: PeerConfig,
+  implementers: PeerConfig[],
+  brief: string,
+  stack: string | undefined,
+  peerInput: string,
+  repoRoot: string,
+): Promise<{plan?: PlanFile; costUsd?: number; error?: string}> {
+  const {execa} = await import('execa')
+  const schemaPath = path.join(os.tmpdir(), `metaclide-plan-schema-${Date.now()}.json`)
+  const outputPath = path.join(os.tmpdir(), `metaclide-plan-output-${Date.now()}.json`)
+
+  try {
+    fs.writeFileSync(schemaPath, JSON.stringify(PLAN_SCHEMA))
+
+    const prompt = `Create a task plan for this project.
+Brief: ${brief.slice(0, 2000)}
+Stack: ${stack ?? 'Determine from brief'}
+Peer discussion: ${peerInput.slice(0, 1000) || '(none)'}
+Team members (use these exact IDs as owner): ${implementers.map(p => p.id).join(', ')}
+Create 2-6 tasks. Each task needs an id, title, owner (peer id), acceptance criteria, and dependencies.`
+
+    const args = ['exec', '--json', '--full-auto', '--sandbox', 'workspace-write',
+      '--output-schema', schemaPath, '-o', outputPath, prompt]
+
+    const result = await execa('codex', args, {
+      cwd: repoRoot,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      reject: false,
+      timeout: 120_000,
+    })
+
+    // Parse cost from NDJSON output
+    let costUsd = 0
+    const stdout = result.stdout ?? ''
+    for (const line of stdout.split(/\}\s*\{/).map((s, i, a) => (i > 0 ? '{' : '') + s + (i < a.length - 1 ? '}' : ''))) {
+      try {
+        const ev = JSON.parse(line) as Record<string, unknown>
+        if (ev.type === 'turn.completed') {
+          const usage = ev.usage as {input_tokens?: number; output_tokens?: number} | undefined
+          if (usage) costUsd = ((usage.input_tokens ?? 0) * 0.000003) + ((usage.output_tokens ?? 0) * 0.000015)
+        }
+      } catch { /* skip */ }
+    }
+
+    if (!fs.existsSync(outputPath)) {
+      return {error: 'No output file produced', costUsd}
+    }
+
+    const raw = JSON.parse(fs.readFileSync(outputPath, 'utf8')) as Record<string, unknown>
+    const tasks: Task[] = (Array.isArray(raw.tasks) ? raw.tasks : []).map((t: Record<string, unknown>) => ({
+      id: String(t.id ?? `task-${Math.random().toString(36).slice(2, 6)}`),
+      title: String(t.title ?? ''),
+      owner: String(t.owner ?? implementers[0]?.id ?? 'unknown'),
+      status: 'pending' as const,
+      phase: 'implement',
+      dependencies: Array.isArray(t.dependencies) ? t.dependencies.map(String) : [],
+      acceptance: String(t.acceptance ?? ''),
+    }))
+
+    return {
+      plan: {version: Number(raw.version ?? 1), project: String(raw.project ?? 'project'), tasks},
+      costUsd,
+    }
+  } catch (err) {
+    return {error: String(err)}
+  } finally {
+    try { fs.unlinkSync(schemaPath) } catch { /* ok */ }
+    try { fs.unlinkSync(outputPath) } catch { /* ok */ }
+  }
+}
 
 // ── Fan-in: merge N async iterables into one, preserving concurrency ──
 async function* fanIn<T>(iters: AsyncIterable<T>[]): AsyncIterable<T> {
@@ -285,69 +384,22 @@ export class OrchestrationRunner {
         .map(([id, resp]) => `## ${id}\n${resp}`)
         .join('\n\n')
 
-      const planPrompt = `OUTPUT ONLY RAW JSON. No markdown, no explanation, no code fences. Just a JSON object.
+      // Use structured output to get plan as valid JSON
+      const planResult = await generatePlan(conductor, implementers, brief, opts.stack, peerInput, repoRoot)
+      if (planResult.plan) {
+        const planPath = path.join(repoRoot, '.orch', 'plan.json')
+        fs.writeFileSync(planPath, JSON.stringify(planResult.plan, null, 2))
+        yield {type: 'log', message: `✓ Plan created: ${planResult.plan.tasks.length} tasks`}
 
-Project: ${brief.split('\n').slice(0, 3).join(' ')}
-Stack: ${opts.stack ?? 'Determine from brief'}
-Peers: ${peerInput || '(none)'}
-Team: ${implementers.map(p => `${p.id} (${p.role})`).join(', ')}
-
-Return this exact JSON structure (nothing else):
-{"version":1,"project":"NAME","tasks":[{"id":"task-001","title":"WHAT","owner":"PEER_ID","status":"pending","phase":"implement","dependencies":[],"acceptance":"CRITERIA"}]}`
-
-      let planText = ''
-      for await (const e of conductorPeer.send({type: 'plan', content: planPrompt})) {
-        if (e.type === 'text') planText += e.content ?? ''
-        yield* trackCost({type: 'peer_event', peerId: conductor.id, displayName: conductor.displayName, peerEvent: e})
-      }
-
-      // Extract plan JSON from conductor's response
-      // Try to extract JSON: bare JSON, code-fenced, or regex fallback
-      let jsonMatch: RegExpMatchArray | null = null
-      try {
-        JSON.parse(planText.trim())
-        jsonMatch = [planText.trim(), planText.trim()]
-      } catch {
-        jsonMatch = planText.match(/```(?:json)?\s*([\s\S]*?)\s*```/) ?? planText.match(/(\{[\s\S]*"tasks"[\s\S]*\})/)
-      }
-      if (jsonMatch) {
-        try {
-          const raw = JSON.parse(jsonMatch[1]) as Record<string, unknown>
-          // Normalize: ensure version, and fill in missing task fields
-          const tasks = (Array.isArray(raw.tasks) ? raw.tasks : []).map((t: Record<string, unknown>) => ({
-            id: String(t.id ?? `task-${Math.random().toString(36).slice(2, 6)}`),
-            title: String(t.title ?? ''),
-            owner: String(t.owner ?? implementers[0]?.id ?? 'unknown'),
-            status: String(t.status ?? 'pending') as Task['status'],
-            phase: String(t.phase ?? 'implement'),
-            dependencies: Array.isArray(t.dependencies) ? t.dependencies.map(String) : [],
-            acceptance: String(t.acceptance ?? ''),
-          }))
-          const plan: PlanFile = {
-            version: Number(raw.version ?? raw.contractVersion ?? 1),
-            project: String(raw.project ?? 'project'),
-            tasks,
-          }
-          // Write plan.json
-          const planPath = path.join(repoRoot, '.orch', 'plan.json')
-          fs.writeFileSync(planPath, JSON.stringify(plan, null, 2))
-          yield {type: 'log', message: `✓ Plan created: ${plan.tasks?.length ?? 0} tasks`}
-
-          // Write minimal contracts
-          const contractsDir = path.join(repoRoot, '.orch', 'contracts')
-          fs.mkdirSync(contractsDir, {recursive: true})
-          fs.writeFileSync(path.join(contractsDir, 'VERSION'), String(plan.version ?? 1))
-          const contracts = raw.contracts as Record<string, unknown> | undefined
-          const decisions = raw.decisions ?? contracts?.['decisions.md']
-          if (decisions) {
-            const text = Array.isArray(decisions) ? decisions.join('\n') : String(decisions)
-            fs.writeFileSync(path.join(contractsDir, 'decisions.md'), text)
-          }
-        } catch (err) {
-          yield {type: 'log', level: 'warn', message: `Could not parse plan JSON: ${err}`}
-        }
+        // Write minimal contracts
+        const contractsDir = path.join(repoRoot, '.orch', 'contracts')
+        fs.mkdirSync(contractsDir, {recursive: true})
+        fs.writeFileSync(path.join(contractsDir, 'VERSION'), String(planResult.plan.version))
       } else {
-        yield {type: 'log', level: 'warn', message: 'Conductor did not return a JSON plan block'}
+        yield {type: 'log', level: 'warn', message: `Plan generation failed: ${planResult.error}`}
+      }
+      if (planResult.costUsd) {
+        router.recordUsage(conductor.id, conductor.provider, planResult.costUsd, 1)
       }
     } else if (!opts.skipPlanning) {
       // Conductor-only session, no discussion
