@@ -75,10 +75,12 @@ export class CodexPeer implements Peer {
     const savedThreadId = this.sessions.getCodexThreadId(this.id)
 
     const modelArgs = this.config.model ? ['-m', this.config.model] : []
+    // Conductor needs full access to write contracts into .orch (which is a junction)
+    const sandbox = this.role === 'conductor' ? 'danger-full-access' : 'workspace-write'
     // Flags MUST come before the prompt — otherwise Codex CLI ignores them
     const args = savedThreadId
-      ? ['exec', '--json', '--full-auto', '--sandbox', 'workspace-write', ...modelArgs, 'resume', savedThreadId, prompt]
-      : ['exec', '--json', '--full-auto', '--sandbox', 'workspace-write', ...modelArgs, prompt]
+      ? ['exec', '--json', '--full-auto', '--sandbox', sandbox, ...modelArgs, 'resume', savedThreadId, prompt]
+      : ['exec', '--json', '--full-auto', '--sandbox', sandbox, ...modelArgs, prompt]
 
     const env: Record<string, string> = {...(process.env as Record<string, string>)}
 
