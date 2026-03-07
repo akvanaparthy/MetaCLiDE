@@ -82,12 +82,17 @@ async function generatePlan(
   try {
     fs.writeFileSync(schemaPath, JSON.stringify(PLAN_SCHEMA))
 
-    const prompt = `Create a task plan for this project.
-Brief: ${brief.slice(0, 2000)}
+    const peerIds = implementers.map(p => p.id)
+    const prompt = `IGNORE all files in the working directory. Plan ONLY for this project brief:
+
+${brief.slice(0, 2000)}
+
 Stack: ${stack ?? 'Determine from brief'}
-Peer discussion: ${peerInput.slice(0, 1000) || '(none)'}
-Team members (use these exact IDs as owner): ${implementers.map(p => p.id).join(', ')}
-Create 2-6 tasks. Each task needs an id, title, owner (peer id), acceptance criteria, and dependencies.`
+Discussion: ${peerInput.slice(0, 1000) || '(none)'}
+
+CRITICAL: The "owner" field MUST be one of these exact strings: ${peerIds.map(id => `"${id}"`).join(', ')}
+Do NOT use any other owner values. Distribute tasks among these peer IDs.
+Create 2-6 focused tasks for the project described in the brief above.`
 
     const args = ['exec', '--json', '--full-auto', '--sandbox', 'workspace-write',
       '--output-schema', schemaPath, '-o', outputPath, prompt]
@@ -117,15 +122,22 @@ Create 2-6 tasks. Each task needs an id, title, owner (peer id), acceptance crit
     }
 
     const raw = JSON.parse(fs.readFileSync(outputPath, 'utf8')) as Record<string, unknown>
-    const tasks: Task[] = (Array.isArray(raw.tasks) ? raw.tasks : []).map((t: Record<string, unknown>) => ({
-      id: String(t.id ?? `task-${Math.random().toString(36).slice(2, 6)}`),
-      title: String(t.title ?? ''),
-      owner: String(t.owner ?? implementers[0]?.id ?? 'unknown'),
-      status: 'pending' as const,
-      phase: 'implement',
-      dependencies: Array.isArray(t.dependencies) ? t.dependencies.map(String) : [],
-      acceptance: String(t.acceptance ?? ''),
-    }))
+    const tasks: Task[] = (Array.isArray(raw.tasks) ? raw.tasks : []).map((t: Record<string, unknown>, idx: number) => {
+      // Normalize owner: if not a valid peer ID, round-robin assign
+      let owner = String(t.owner ?? '')
+      if (!peerIds.includes(owner)) {
+        owner = peerIds[idx % peerIds.length]
+      }
+      return {
+        id: String(t.id ?? `task-${Math.random().toString(36).slice(2, 6)}`),
+        title: String(t.title ?? ''),
+        owner,
+        status: 'pending' as const,
+        phase: 'implement',
+        dependencies: Array.isArray(t.dependencies) ? t.dependencies.map(String) : [],
+        acceptance: String(t.acceptance ?? ''),
+      }
+    })
 
     return {
       plan: {version: Number(raw.version ?? 1), project: String(raw.project ?? 'project'), tasks},
