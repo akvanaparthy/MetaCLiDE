@@ -328,7 +328,22 @@ Respond ONLY with the JSON block.`
       const jsonMatch = planText.match(/```json\s*([\s\S]*?)\s*```/) ?? planText.match(/(\{[\s\S]*"tasks"[\s\S]*\})/)
       if (jsonMatch) {
         try {
-          const plan = JSON.parse(jsonMatch[1]) as PlanFile & {decisions?: string}
+          const raw = JSON.parse(jsonMatch[1]) as Record<string, unknown>
+          // Normalize: ensure version, and fill in missing task fields
+          const tasks = (Array.isArray(raw.tasks) ? raw.tasks : []).map((t: Record<string, unknown>) => ({
+            id: String(t.id ?? `task-${Math.random().toString(36).slice(2, 6)}`),
+            title: String(t.title ?? ''),
+            owner: String(t.owner ?? implementers[0]?.id ?? 'unknown'),
+            status: String(t.status ?? 'pending') as Task['status'],
+            phase: String(t.phase ?? 'implement'),
+            dependencies: Array.isArray(t.dependencies) ? t.dependencies.map(String) : [],
+            acceptance: String(t.acceptance ?? ''),
+          }))
+          const plan: PlanFile = {
+            version: Number(raw.version ?? raw.contractVersion ?? 1),
+            project: String(raw.project ?? 'project'),
+            tasks,
+          }
           // Write plan.json
           const planPath = path.join(repoRoot, '.orch', 'plan.json')
           fs.writeFileSync(planPath, JSON.stringify(plan, null, 2))
@@ -338,8 +353,11 @@ Respond ONLY with the JSON block.`
           const contractsDir = path.join(repoRoot, '.orch', 'contracts')
           fs.mkdirSync(contractsDir, {recursive: true})
           fs.writeFileSync(path.join(contractsDir, 'VERSION'), String(plan.version ?? 1))
-          if (plan.decisions) {
-            fs.writeFileSync(path.join(contractsDir, 'decisions.md'), String(plan.decisions))
+          const contracts = raw.contracts as Record<string, unknown> | undefined
+          const decisions = raw.decisions ?? contracts?.['decisions.md']
+          if (decisions) {
+            const text = Array.isArray(decisions) ? decisions.join('\n') : String(decisions)
+            fs.writeFileSync(path.join(contractsDir, 'decisions.md'), text)
           }
         } catch (err) {
           yield {type: 'log', level: 'warn', message: `Could not parse plan JSON: ${err}`}
