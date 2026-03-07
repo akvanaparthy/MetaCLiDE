@@ -10,6 +10,27 @@ import {getCredential} from '../auth/keychain.js'
 
 const PLUGINS_DIR = path.join(os.homedir(), '.metaclide', 'plugins')
 
+export function installPlugin(manifestPath: string): PluginManifest {
+  const rawManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+  const result = PluginManifestSchema.safeParse(rawManifest)
+  if (!result.success) throw new Error(`Invalid manifest: ${result.error.message}`)
+  const manifest = result.data as PluginManifest
+
+  const pluginDir = path.join(PLUGINS_DIR, manifest.id)
+  fs.mkdirSync(pluginDir, {recursive: true})
+
+  // Copy entire plugin directory
+  const sourceDir = path.dirname(path.resolve(manifestPath))
+  for (const entry of fs.readdirSync(sourceDir)) {
+    const src = path.join(sourceDir, entry)
+    const dest = path.join(pluginDir, entry)
+    if (fs.statSync(src).isFile()) {
+      fs.copyFileSync(src, dest)
+    }
+  }
+  return manifest
+}
+
 export function listInstalledPlugins(): PluginManifest[] {
   if (!fs.existsSync(PLUGINS_DIR)) return []
   const manifests: PluginManifest[] = []

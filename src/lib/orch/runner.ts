@@ -415,19 +415,18 @@ export class OrchestrationRunner {
       // Conductor-only session, no discussion
       yield {type: 'phase', phase: 'planning', message: 'Phase 1: Planning'}
 
-      const planPrompt = `You are the Conductor for this session.
-
-## Project Brief
-${brief}
-
-## Tech Stack
-${opts.stack ?? 'Determine from brief'}
-
-Create the canonical contracts (api.openapi.yaml, pages.routes.json, entities.schema.json, types.ts, decisions.md) and plan.json in .orch/. Set VERSION to 1.`
-
-      for await (const e of conductorPeer.send({type: 'plan', content: planPrompt})) {
-        yield* trackCost({type: 'peer_event', peerId: conductor.id, displayName: conductor.displayName, peerEvent: e})
+      const planResult = await generatePlan(conductor, implementers, brief, opts.stack, '', repoRoot)
+      if (planResult.plan) {
+        const planPath = path.join(repoRoot, '.orch', 'plan.json')
+        fs.writeFileSync(planPath, JSON.stringify(planResult.plan, null, 2))
+        yield {type: 'log', message: `✓ Plan created: ${planResult.plan.tasks.length} tasks`}
+        const contractsDir = path.join(repoRoot, '.orch', 'contracts')
+        fs.mkdirSync(contractsDir, {recursive: true})
+        fs.writeFileSync(path.join(contractsDir, 'VERSION'), String(planResult.plan.version))
+      } else {
+        yield {type: 'log', level: 'warn', message: `Plan generation failed: ${planResult.error}`}
       }
+      if (planResult.costUsd) router.recordUsage(conductor.id, conductor.provider, planResult.costUsd, 1)
     } else {
       yield {type: 'log', message: 'Skipping planning (contracts exist)'}
     }
@@ -473,6 +472,12 @@ Create the canonical contracts (api.openapi.yaml, pages.routes.json, entities.sc
       const knownCRIds = new Set(orch.listChangeRequests().map(cr => cr.id))
 
       const implIters = selectedPeers.map(cfg => {
+        // Budget check before dispatching
+        if (router.isOverBudget(cfg.id, cfg.provider)) {
+          return (async function*(): AsyncIterable<OrchEvent> {
+            yield {type: 'log', level: 'warn', message: `[${cfg.id}] over budget — skipping`}
+          })()
+        }
         const peer = peers.get(cfg.id)!
         const tasks = tasksByOwner[cfg.id] ?? []
         return peerImplement(peer, cfg, tasks, contractContent, worktreePaths[cfg.id], wm)

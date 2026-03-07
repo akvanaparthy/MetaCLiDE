@@ -203,7 +203,7 @@ export class AgenticApiPeer implements Peer {
     const {OpenAI} = await import('openai')
     const client = new OpenAI({
       apiKey,
-      baseURL: this.baseURL ?? (this.config.apiKey ? undefined : 'https://api.openai.com/v1'),
+      baseURL: this.baseURL,
     })
 
     const model = this.config.model ?? this.defaultModel()

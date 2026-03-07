@@ -2,6 +2,7 @@ import {Command, Args, Flags} from '@oclif/core'
 import {BUILT_IN_AGENTS, detectInstalledCLIs} from '../../lib/auth/session.js'
 import {storeCredential} from '../../lib/auth/keychain.js'
 import {requireOrch} from '../../lib/orch/index.js'
+import {installPlugin} from '../../lib/plugins/registry.js'
 import type {PeerConfig} from '../../types.js'
 import * as readline from 'node:readline/promises'
 import {stdin as input, stdout as output} from 'node:process'
@@ -27,6 +28,7 @@ export default class AgentsAdd extends Command {
     provider: Flags.string({description: 'Provider for custom agents (openai, moonshot, or any OpenAI-compat)'}),
     'base-url': Flags.string({description: 'Base URL for custom OpenAI-compatible providers'}),
     'install-cli': Flags.boolean({description: 'Install the agent CLI if not found (Codex: npm i -g @openai/codex, Kimi: pip install kimi-cli)'}),
+    plugin: Flags.string({description: 'Path to a plugin manifest.json for custom peer adapters'}),
   }
 
   async run(): Promise<void> {
@@ -37,6 +39,12 @@ export default class AgentsAdd extends Command {
     const rl = readline.createInterface({input, output})
 
     try {
+      // Plugin path
+      if (flags.plugin) {
+        await this.addPlugin(args.id, flags, orch)
+        return
+      }
+
       // Custom provider path
       if (flags.provider || flags['base-url']) {
         await this.addCustomAgent(args.id, flags, orch, rl)
@@ -154,6 +162,38 @@ export default class AgentsAdd extends Command {
 
     this.log(`Added custom agent "${id}" (provider: ${provider}${baseURL ? `, base: ${baseURL}` : ''})`)
     this.log(`Mode: agentic API loop (full file editing + bash via tool calling)`)
+  }
+
+  private async addPlugin(
+    id: string,
+    flags: Record<string, unknown>,
+    orch: ReturnType<typeof requireOrch>['orch'],
+  ): Promise<void> {
+    const manifestPath = flags.plugin as string
+    try {
+      const manifest = installPlugin(manifestPath)
+      const role = (flags.role as 'conductor' | 'implementer') ?? 'implementer'
+      const peers = orch.readPeers() ?? {conductor: '', peers: []}
+
+      const newPeer: PeerConfig = {
+        id: manifest.id,
+        displayName: manifest.displayName ?? manifest.id,
+        type: 'tool',
+        provider: manifest.id,
+        mode: 'byok',
+        contextFile: 'AGENTS.md',
+        branch: `agent/${manifest.id}`,
+        role,
+      }
+
+      peers.peers.push(newPeer)
+      if (role === 'conductor' || !peers.conductor) peers.conductor = manifest.id
+      orch.writePeers(peers)
+
+      this.log(`✓ Plugin "${manifest.id}" installed and added as ${role}`)
+    } catch (err) {
+      this.error(`Plugin install failed: ${err}`)
+    }
   }
 
   private async installCLI(agentId: string): Promise<void> {
