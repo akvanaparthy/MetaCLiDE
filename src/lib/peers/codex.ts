@@ -75,9 +75,10 @@ export class CodexPeer implements Peer {
     const savedThreadId = this.sessions.getCodexThreadId(this.id)
 
     const modelArgs = this.config.model ? ['-m', this.config.model] : []
+    // Flags MUST come before the prompt — otherwise Codex CLI ignores them
     const args = savedThreadId
-      ? ['exec', 'resume', savedThreadId, prompt, '--json', '--full-auto', '--sandbox', 'workspace-write', ...modelArgs]
-      : ['exec', prompt, '--json', '--full-auto', '--sandbox', 'workspace-write', ...modelArgs]
+      ? ['exec', '--json', '--full-auto', '--sandbox', 'workspace-write', ...modelArgs, 'resume', savedThreadId, prompt]
+      : ['exec', '--json', '--full-auto', '--sandbox', 'workspace-write', ...modelArgs, prompt]
 
     const env: Record<string, string> = {...(process.env as Record<string, string>)}
 

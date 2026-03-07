@@ -362,7 +362,7 @@ RULES:
     try {
       let args: string[]
       if (isCodex) {
-        args = ['exec', prompt, '--json', '--full-auto', '--sandbox', 'workspace-write']
+        args = ['exec', '--json', '--full-auto', '--sandbox', 'workspace-write', prompt]
       } else {
         args = ['--print', '-y', '-p', prompt, '--work-dir', this.config.repoRoot, '--output-format', 'stream-json']
       }
