@@ -380,24 +380,27 @@ RULES:
 
       for await (const chunk of proc.iterable()) {
         buffer += String(chunk)
-        const lines = buffer.split('\n')
-        buffer = lines.pop() ?? ''
+        // Codex emits JSON without newlines — split on }{ boundary
+        const parts = buffer.split(/\}\s*\{/).map((s, i, arr) =>
+          (i > 0 ? '{' : '') + s + (i < arr.length - 1 ? '}' : '')
+        )
+        buffer = parts.pop() ?? ''
 
-        for (const line of lines) {
-          if (!line.trim()) continue
+        for (const fragment of parts) {
+          if (!fragment.trim()) continue
           try {
-            const event = JSON.parse(line) as Record<string, unknown>
+            const event = JSON.parse(fragment) as Record<string, unknown>
 
             if (isCodex) {
               const type = event.type as string
-              if (type === 'item.updated') {
+              if (type === 'item.updated' || type === 'item.completed') {
                 const item = event.item as Record<string, unknown> | undefined
                 const itemId = String(event.item_id ?? item?.id ?? '')
                 const itemType = String(event.item_type ?? item?.type ?? '')
                 if (itemType === 'agent_message' || itemType === 'reasoning') {
                   const accumulated = String(event.content ?? item?.text ?? '')
                   const prev = itemText.get(itemId) ?? ''
-                  const delta = accumulated.length > prev.length ? accumulated.slice(prev.length) : ''
+                  const delta = accumulated.length > prev.length ? accumulated.slice(prev.length) : (prev.length === 0 ? accumulated : '')
                   if (delta) {
                     itemText.set(itemId, accumulated)
                     fullText += delta
@@ -422,9 +425,27 @@ RULES:
               }
             }
           } catch {
-            if (line.trim()) { fullText += line; yield {type: 'text', content: line} }
+            if (fragment.trim()) { fullText += fragment; yield {type: 'text', content: fragment} }
           }
         }
+      }
+
+      // Flush remaining buffer
+      if (buffer.trim()) {
+        try {
+          const event = JSON.parse(buffer) as Record<string, unknown>
+          if (isCodex) {
+            const type = event.type as string
+            if (type === 'item.updated' || type === 'item.completed') {
+              const item = event.item as Record<string, unknown> | undefined
+              const itemType = String(event.item_type ?? item?.type ?? '')
+              if (itemType === 'agent_message' || itemType === 'reasoning') {
+                const text = String(event.content ?? item?.text ?? '')
+                if (text) { fullText += text; yield {type: 'text', content: text} }
+              }
+            }
+          }
+        } catch { /* skip */ }
       }
 
       await proc

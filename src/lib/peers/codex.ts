@@ -106,23 +106,26 @@ export class CodexPeer implements Peer {
 
       for await (const chunk of proc.iterable()) {
         buffer += String(chunk)
-        const lines = buffer.split('\n')
-        buffer = lines.pop() ?? ''
+        // Codex emits JSON objects without newlines — split on }{ boundary
+        const objects = buffer.split(/\}\s*\{/).map((s, i, arr) =>
+          (i > 0 ? '{' : '') + s + (i < arr.length - 1 ? '}' : '')
+        )
+        buffer = objects.pop() ?? ''
 
-        for (const line of lines) {
-          if (!line.trim()) continue
+        for (const fragment of objects) {
+          if (!fragment.trim()) continue
           try {
-            const event = JSON.parse(line) as Record<string, unknown>
+            const event = JSON.parse(fragment) as Record<string, unknown>
             yield* this.mapCodexEvent(event, msg.taskId, itemTypes, itemText)
-          } catch { /* non-JSON line, ignore */ }
+          } catch { /* non-JSON fragment, ignore */ }
         }
       }
 
-      // Flush remaining buffer
+      // Flush remaining buffer (last complete JSON object)
       if (buffer.trim()) {
         try {
           const event = JSON.parse(buffer) as Record<string, unknown>
-          yield* this.mapCodexEvent(event, msg.taskId)
+          yield* this.mapCodexEvent(event, msg.taskId, itemTypes, itemText)
         } catch { /* skip */ }
       }
 
@@ -177,7 +180,17 @@ export class CodexPeer implements Peer {
 
     if (type === 'item.completed') {
       const iType = itemType ?? itemTypes.get(itemId ?? '') ?? ''
-      if (iType === 'file_change') {
+      if (iType === 'agent_message' || iType === 'reasoning') {
+        // Short responses: Codex skips item.updated, sends text directly in item.completed
+        const full = String(item?.text ?? event.content ?? '')
+        const prev = itemText.get(itemId ?? '') ?? ''
+        const delta = full.length > prev.length ? full.slice(prev.length) : (prev.length === 0 ? full : '')
+        if (delta) {
+          itemText.set(itemId ?? '', full)
+          this.logger.append({type: 'text', content: delta, taskId})
+          yield {type: 'text', content: delta}
+        }
+      } else if (iType === 'file_change') {
         const toolInput = {path: event.path ?? item?.path, operation: event.operation ?? item?.operation}
         this.logger.append({type: 'tool_use', toolName: 'file_change', toolInput, taskId})
         yield {type: 'tool_use', toolName: 'file_change', toolInput}
