@@ -31,17 +31,19 @@ export class VerificationGates {
     const cmd = this.config[gate]
     if (!cmd) return {result: 'skip', output: ''}
 
-    // Simple shell split — handles the npm run patterns we use
-    const parts = cmd.split(/\s+/)
-    const [bin, ...args] = parts
     try {
-      const proc = await execa(bin, args, {
+      // Use shell: true for proper npm command handling
+      const proc = await execa(cmd, {
         cwd: this.projectRoot,
         stdio: 'pipe',
         reject: false,
-        shell: false,
+        shell: true,
+        timeout: 120_000,  // 2 minute timeout per gate
       })
       const output = [proc.stdout, proc.stderr].filter(Boolean).join('\n').trim()
+      if (proc.timedOut) {
+        return {result: 'fail', output: `Timed out after 120s\n${output}`}
+      }
       const result: GateResult = proc.exitCode === 0 ? 'pass' : 'fail'
       return {result, output}
     } catch (err) {

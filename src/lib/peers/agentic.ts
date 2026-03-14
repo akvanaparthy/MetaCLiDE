@@ -330,8 +330,8 @@ export class AgenticApiPeer implements Peer {
       if (completed) return
     }
 
-    // Max turns reached
-    const summary = 'Max turns reached'
+    // Max turns reached — warn which task was in progress
+    const summary = `Max turns (${MAX_TURNS}) reached — task may be incomplete. Increase MAX_TURNS or simplify the task.`
     this.logger.append({type: 'result', content: summary, costUsd: totalCost, turns: MAX_TURNS, taskId: msg.taskId})
     yield {type: 'result', content: summary, costUsd: totalCost, turns: MAX_TURNS}
   }

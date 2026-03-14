@@ -1,9 +1,11 @@
 // AgentManager TUI — /agents command
 // Shows all agents with auth status + current model.
 // Selecting an agent opens an official model picker for that provider.
-import React, {useState} from 'react'
+import React, {useState, useEffect} from 'react'
 import {Box, Text, useInput} from 'ink'
 import SelectInput from 'ink-select-input'
+import {fetchAvailableModels} from './conductor.js'
+import {getCredential} from '../lib/auth/keychain.js'
 
 export interface AgentEntry {
   id: string
@@ -63,21 +65,83 @@ function authColor(status: AgentEntry['authStatus']): string {
 
 // ── Model picker for a single agent ──
 
+const KEYCHAIN_IDS: Record<string, string> = {
+  anthropic: 'anthropic',
+  openai: 'openai',
+  moonshot: 'moonshot',
+}
+
+const ENV_KEYS: Record<string, string> = {
+  anthropic: 'ANTHROPIC_API_KEY',
+  openai: 'OPENAI_API_KEY',
+  moonshot: 'MOONSHOT_API_KEY',
+}
+
 function ModelPicker({agent, onSelect, onBack}: {
   agent: AgentEntry
   onSelect: (model: string) => void
   onBack: () => void
 }) {
-  const models = PROVIDER_MODELS[agent.provider] ?? []
+  const [models, setModels] = useState<string[]>([])
+  const [fetching, setFetching] = useState(true)
+  const [error, setError] = useState('')
 
   useInput((_, key) => {
     if (key.escape) onBack()
   })
 
-  if (models.length === 0) {
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      // Resolve an API key for fetching models
+      let apiKey = process.env[ENV_KEYS[agent.provider] ?? '']?.trim() ?? ''
+      if (!apiKey) {
+        const stored = await getCredential(KEYCHAIN_IDS[agent.provider] ?? agent.provider)
+        apiKey = stored?.trim() ?? ''
+      }
+
+      if (!apiKey) {
+        if (!cancelled) {
+          // Fall back to hardcoded list
+          const fallback = PROVIDER_MODELS[agent.provider]
+          if (fallback?.length) {
+            setModels(fallback.map(m => m.id))
+          } else {
+            setError('No API key available to fetch models.')
+          }
+          setFetching(false)
+        }
+        return
+      }
+
+      const fetched = await fetchAvailableModels(agent.provider, apiKey)
+      if (!cancelled) {
+        if (fetched.length > 0) {
+          setModels(fetched)
+        } else {
+          // Fallback
+          const fallback = PROVIDER_MODELS[agent.provider]
+          setModels(fallback?.length ? fallback.map(m => m.id) : [])
+          if (!fallback?.length) setError('Could not fetch models from API.')
+        }
+        setFetching(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [agent.provider])
+
+  if (fetching) {
     return (
       <Box flexDirection="column">
-        <Text bold>No official models defined for provider "{agent.provider}".</Text>
+        <Text color="yellow">Fetching models from {agent.provider}...</Text>
+      </Box>
+    )
+  }
+
+  if (error || models.length === 0) {
+    return (
+      <Box flexDirection="column">
+        <Text bold>{error || `No models found for "${agent.provider}".`}</Text>
         <Text dimColor>Set model manually: metaclide agents add {agent.id} --model &lt;model-id&gt;</Text>
         <Text dimColor>Press Esc to go back.</Text>
       </Box>
@@ -85,13 +149,9 @@ function ModelPicker({agent, onSelect, onBack}: {
   }
 
   const items = models.map(m => ({
-    label: [
-      m.recommended ? '★ ' : '  ',
-      m.label.padEnd(28),
-      m.note,
-      agent.currentModel === m.id ? '  ← current' : '',
-    ].join(''),
-    value: m.id,
+    key: m,
+    label: m === agent.currentModel ? `${m}  ← current` : m,
+    value: m,
   }))
 
   return (
@@ -106,11 +166,14 @@ function ModelPicker({agent, onSelect, onBack}: {
           <Text dimColor>  (API mode)</Text>
         )}
       </Box>
-      <SelectInput
-        items={items}
-        onSelect={(item) => onSelect(item.value)}
-        initialIndex={models.findIndex(m => m.id === agent.currentModel)}
-      />
+      <Text dimColor>{models.length} models available</Text>
+      <Box marginTop={1}>
+        <SelectInput
+          items={items}
+          onSelect={(item) => onSelect(item.value)}
+          initialIndex={Math.max(0, models.indexOf(agent.currentModel ?? ''))}
+        />
+      </Box>
       <Box marginTop={1}>
         <Text dimColor>Esc to cancel</Text>
       </Box>
@@ -149,41 +212,46 @@ export function AgentManager({agents, onModelChange, onBack}: AgentManagerProps)
     const roleTag = a.role === 'conductor' ? '[conductor]' : '[implementer]'
     const cliTag = a.cliInstalled ? 'CLI' : 'API'
     return {
+      key: a.id,
       label: `${tick} ${a.displayName.padEnd(16)} ${modelStr.padEnd(30)} ${roleTag} ${cliTag}`,
       value: a.id,
     }
   })
 
-  items.push({label: '← Back', value: '__back__'})
+  items.push({key: 'back', label: '← Back', value: '__back__'})
 
   return (
     <Box flexDirection="column">
       <Box marginBottom={1}>
         <Text bold color="cyan">Agent Manager</Text>
-        <Text dimColor>  — select an agent to change its model</Text>
+        <Text dimColor>  — select an agent to configure its model</Text>
       </Box>
 
-      {/* Auth status legend */}
-      <Box marginBottom={1} gap={3}>
-        <Text><Text color="green">✓ subscription</Text></Text>
-        <Text><Text color="cyan">✓ API key</Text></Text>
-        <Text><Text dimColor>✗ not connected</Text></Text>
-      </Box>
-
-      {/* Agent list */}
-      {agents.map(a => (
-        <Box key={a.id} marginBottom={0}>
-          <Text color={authColor(a.authStatus) as 'green' | 'cyan' | 'red'}>
-            {authLabel(a).padEnd(20)}
-          </Text>
-          <Text bold color="white">{a.displayName.padEnd(16)}</Text>
-          <Text dimColor>{(a.currentModel ?? 'default').padEnd(32)}</Text>
-          <Text dimColor>{a.role}  {a.cliInstalled ? 'CLI' : 'API loop'}</Text>
-        </Box>
-      ))}
+      {/* Agent summary table */}
+      {agents.map(a => {
+        const aColor = authColor(a.authStatus) as 'green' | 'cyan' | 'red'
+        const configTag = a.configured ? '✓ configured' : '  not added'
+        return (
+          <Box key={a.id} marginBottom={0}>
+            <Box width={3}>
+              <Text color={aColor}>{a.authStatus !== 'none' ? '●' : '○'}</Text>
+            </Box>
+            <Box width={16}>
+              <Text bold>{a.displayName}</Text>
+            </Box>
+            <Box width={30}>
+              <Text color={a.currentModel ? 'white' : 'gray'}>{a.currentModel ?? '(no model set)'}</Text>
+            </Box>
+            <Box width={16}>
+              <Text color={a.configured ? 'green' : 'gray'}>{configTag}</Text>
+            </Box>
+            <Text dimColor>{a.cliInstalled ? 'CLI' : 'API'}</Text>
+          </Box>
+        )
+      })}
 
       <Box marginTop={1}>
-        <Text dimColor>Select to change model:</Text>
+        <Text dimColor>Select agent to set model (auto-adds to session):</Text>
       </Box>
       <SelectInput
         items={items}
@@ -194,7 +262,7 @@ export function AgentManager({agents, onModelChange, onBack}: AgentManagerProps)
         }}
       />
       <Box marginTop={1}>
-        <Text dimColor>Esc to go back  •  Not listed? metaclide agents add &lt;id&gt;</Text>
+        <Text dimColor>Esc to go back  ·  Selecting a model auto-configures the agent for /run</Text>
       </Box>
     </Box>
   )

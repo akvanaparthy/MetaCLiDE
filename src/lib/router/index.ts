@@ -12,6 +12,8 @@ export interface UsageRecord {
 export class Router {
   private usage: UsageRecord[] = []
   private sessionCosts: Record<string, number> = {}
+  private phaseCost = 0
+  private currentPhase = ''
 
   constructor(
     private readonly peers: PeerConfig[],
@@ -22,10 +24,18 @@ export class Router {
     }
   ) {}
 
+  setPhase(phase: string): void {
+    this.currentPhase = phase
+    this.phaseCost = 0
+  }
+
   recordUsage(peerId: string, provider: string, costUsd: number, tokens: number): void {
     this.usage.push({peerId, provider, costUsd, tokens, timestamp: new Date().toISOString()})
     this.sessionCosts[peerId] = (this.sessionCosts[peerId] ?? 0) + costUsd
+    this.phaseCost += costUsd
   }
+
+  getPhaseCost(): number { return this.phaseCost }
 
   getSessionCost(peerId: string): number {
     return this.sessionCosts[peerId] ?? 0
@@ -45,6 +55,8 @@ export class Router {
 
     const providerLimit = this.budget.perProvider[provider]
     if (providerLimit !== undefined && this.getProviderCost(provider) >= providerLimit) return true
+
+    if (this.phaseCost >= this.budget.perPhase) return true
 
     return false
   }

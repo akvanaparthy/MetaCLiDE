@@ -15,14 +15,30 @@ interface Props {
   phase: string
 }
 
+const PHASE_COLORS: Record<string, string> = {
+  discuss: 'cyan',
+  planning: 'blue',
+  plan: 'blue',
+  implement: 'yellow',
+  implementation: 'yellow',
+  integrate: 'green',
+  integration: 'green',
+  done: 'greenBright',
+  starting: 'gray',
+}
+
 export function PeerStatusPanel({peers, phase}: Props) {
   if (peers.length === 0) return null
 
+  const phaseColor = PHASE_COLORS[phase?.toLowerCase()] ?? 'yellow'
+
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} marginBottom={1}>
-      <Box marginBottom={0}>
-        <Text dimColor>Phase: </Text>
-        <Text bold color="yellow">{phase.toUpperCase()}</Text>
+      <Box marginBottom={0} gap={1}>
+        <Text dimColor>Phase</Text>
+        <Text bold color={phaseColor}>{phase.toUpperCase()}</Text>
+        <Text dimColor>│</Text>
+        <Text dimColor>{peers.length} agent{peers.length !== 1 ? 's' : ''}</Text>
       </Box>
       {peers.map(p => (
         <PeerRow key={p.peerId} peer={p} />
@@ -36,7 +52,7 @@ function PeerRow({peer}: {peer: PeerDisplayStatus}) {
 
   let indicator: React.ReactNode
   if (peer.status === 'thinking' || peer.status === 'working') {
-    indicator = <Spinner type="dots" />
+    indicator = <Text color={color}><Spinner type="dots" /></Text>
   } else if (peer.status === 'done') {
     indicator = <Text color="green">✓</Text>
   } else if (peer.status === 'error') {
@@ -44,14 +60,16 @@ function PeerRow({peer}: {peer: PeerDisplayStatus}) {
   } else if (peer.status === 'blocked') {
     indicator = <Text color="yellow">⏸</Text>
   } else {
-    indicator = <Text dimColor>○</Text>
+    indicator = <Text dimColor>·</Text>
   }
 
   return (
     <Box>
       <Box width={2}>{indicator}</Box>
-      <Text bold color={color}>{peer.displayName.slice(0, 12).padEnd(12)}</Text>
-      <Text dimColor> {peer.detail.slice(0, 60)}</Text>
+      <Box width={14}>
+        <Text bold color={color}>{peer.displayName.slice(0, 13)}</Text>
+      </Box>
+      <Text dimColor>{peer.detail.slice(0, 55)}</Text>
     </Box>
   )
 }

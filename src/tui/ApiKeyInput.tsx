@@ -12,9 +12,13 @@ export function ApiKeyInput({envVar, onSubmit}: ApiKeyInputProps) {
 
   return (
     <Box flexDirection="column">
-      <Text>Enter your <Text bold color="yellow">{envVar}</Text>:</Text>
+      <Box>
+        <Text dimColor>Enter your </Text>
+        <Text bold color="yellow">{envVar}</Text>
+      </Box>
+      <Text dimColor>Stored securely in OS keychain or encrypted file</Text>
       <Box marginTop={1}>
-        <Text color="cyan">&gt; </Text>
+        <Text color="cyan">❯ </Text>
         <TextInput
           value={value}
           onChange={setValue}

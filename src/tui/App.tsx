@@ -5,6 +5,7 @@ import SelectInput from 'ink-select-input'
 import {Header} from './Header.js'
 import {ChatHistory} from './ChatHistory.js'
 import {StatusBar} from './StatusBar.js'
+import {SlashMenu, getFilteredCommands} from './SlashMenu.js'
 import {PeerStatusPanel, type PeerDisplayStatus} from './PeerStatusRow.js'
 import {ConductorSelect, type ConductorChoice} from './ConductorSelect.js'
 import {ApiKeyInput} from './ApiKeyInput.js'
@@ -66,6 +67,7 @@ export function App({repoRoot, orch, onExit, resumeSessionId}: AppProps) {
   const [sessionList, setSessionList] = useState<SessionState[]>([])
   const [showSessions, setShowSessions] = useState(false)
   const [showAgents, setShowAgents] = useState(false)
+  const [slashIndex, setSlashIndex] = useState(0)
   const titledRef = useRef(false)
 
   const buildAgentEntries = useCallback((): AgentEntry[] => {
@@ -73,6 +75,11 @@ export function App({repoRoot, orch, onExit, resumeSessionId}: AppProps) {
     const clis = detectInstalledCLIs()
     const codexSub = _hasCodexSub()
     const kimiSub = _hasKimiSub()
+
+    // Check env vars for BYOK keys
+    const hasAnthropicEnv = !!process.env.ANTHROPIC_API_KEY?.trim()
+    const hasOpenaiEnv = !!process.env.OPENAI_API_KEY?.trim()
+    const hasMoonshotEnv = !!(process.env.KIMI_API_KEY?.trim() || process.env.MOONSHOT_API_KEY?.trim())
 
     // Start from configured peers, augment with detection
     const allIds = new Set([
@@ -86,10 +93,15 @@ export function App({repoRoot, orch, onExit, resumeSessionId}: AppProps) {
       const provider = peerCfg?.provider ?? builtIn?.provider ?? id
 
       let authStatus: AgentEntry['authStatus'] = 'none'
-      if (id === 'codex') authStatus = codexSub ? 'subscription' : (peerCfg?.apiKey ? 'apikey' : 'none')
-      else if (id === 'kimi') authStatus = kimiSub ? 'subscription' : (peerCfg?.apiKey ? 'apikey' : 'none')
-      else if (id === 'claude') authStatus = peerCfg?.apiKey ? 'apikey' : 'none'
-      else if (peerCfg?.apiKey) authStatus = 'apikey'
+      if (id === 'claude') {
+        authStatus = (hasAnthropicEnv || peerCfg?.apiKey) ? 'apikey' : 'none'
+      } else if (id === 'codex') {
+        authStatus = codexSub ? 'subscription' : (hasOpenaiEnv || peerCfg?.apiKey) ? 'apikey' : 'none'
+      } else if (id === 'kimi') {
+        authStatus = kimiSub ? 'subscription' : (hasMoonshotEnv || peerCfg?.apiKey) ? 'apikey' : 'none'
+      } else if (peerCfg?.apiKey) {
+        authStatus = 'apikey'
+      }
 
       return {
         id,
@@ -240,6 +252,8 @@ export function App({repoRoot, orch, onExit, resumeSessionId}: AppProps) {
     if (cfg) {
       getCredential(cfg.keychainId).then(key => {
         startChat(choice, key ?? undefined, resumeSessionId)
+      }).catch(() => {
+        startChat(choice, undefined, resumeSessionId)
       })
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -520,9 +534,21 @@ export function App({repoRoot, orch, onExit, resumeSessionId}: AppProps) {
   }, [exit, onExit, startOrchestration, orch])
 
   const handleSubmit = useCallback(async (value: string) => {
-    const trimmed = value.trim()
+    let trimmed = value.trim()
     if (!trimmed || !chat || loading) return
+
+    // If submitting from slash menu, use the selected command
+    if (trimmed.startsWith('/')) {
+      const filter = trimmed.slice(1)
+      const filtered = getFilteredCommands(filter)
+      // If exactly one match or user hasn't fully typed it, auto-complete
+      if (filtered.length === 1) {
+        trimmed = filtered[0].name
+      }
+    }
+
     setInputValue('')
+    setSlashIndex(0)
 
     if (trimmed.startsWith('/')) {
       if (handleSlashCommand(trimmed)) return
@@ -579,26 +605,77 @@ export function App({repoRoot, orch, onExit, resumeSessionId}: AppProps) {
 
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {
-      orchAbortRef.current = true
+      // Cancel current operation first, exit on second press
+      if (loading && chat) {
+        chat.abort()
+        setLoading(false)
+        setMessages(prev => {
+          // End any streaming message
+          const updated = prev.map(m => m.streaming ? {...m, streaming: false} : m)
+          return [...updated, {id: nextId(), role: 'system' as const, content: 'Cancelled.'}]
+        })
+        return
+      }
+      if (phase === 'orchestrating') {
+        orchAbortRef.current = true
+        setMessages(prev => [...prev, {id: nextId(), role: 'system' as const, content: 'Orchestration cancelled.'}])
+        setPhase('chat')
+        return
+      }
       onExit(); exit()
     }
     if (key.escape) {
+      if (loading && chat) {
+        chat.abort()
+        setLoading(false)
+        setMessages(prev => {
+          const updated = prev.map(m => m.streaming ? {...m, streaming: false} : m)
+          return [...updated, {id: nextId(), role: 'system' as const, content: 'Cancelled.'}]
+        })
+        return
+      }
+      if (phase === 'orchestrating') {
+        orchAbortRef.current = true
+        setMessages(prev => [...prev, {id: nextId(), role: 'system' as const, content: 'Orchestration cancelled.'}])
+        setPhase('chat')
+        return
+      }
       if (phase === 'conductor_config') setPhase('chat')
       if (showAgents) setShowAgents(false)
       if (showSessions) setShowSessions(false)
     }
+    // Slash menu navigation
+    if (inputValue.startsWith('/') && !loading && phase === 'chat') {
+      const filter = inputValue.slice(1)
+      const filtered = getFilteredCommands(filter)
+      if (key.upArrow) {
+        setSlashIndex(prev => Math.max(0, prev - 1))
+      } else if (key.downArrow) {
+        setSlashIndex(prev => Math.min(filtered.length - 1, prev + 1))
+      } else if (key.tab) {
+        // Tab-complete the selected command
+        if (filtered[slashIndex]) {
+          setInputValue(filtered[slashIndex].name)
+          setSlashIndex(0)
+        }
+      }
+    }
   })
 
-  // (model fetching removed — model list is now hardcoded from PROVIDER_MODELS in ConductorManager)
+  // Model fetching is handled inside ConductorManager and AgentManager components
 
   // ── Render ──
 
   if (phase === 'select_conductor') {
     return (
       <Box flexDirection="column" padding={1}>
-        <Box marginBottom={1}>
-          <Text bold color="cyan">MetaCLiDE</Text>
-          <Text dimColor> — Multi-Agent Coding Orchestration</Text>
+        <Box flexDirection="column" marginBottom={1}>
+          <Text dimColor>{'─'.repeat(60)}</Text>
+          <Box>
+            <Text bold color="cyanBright">  MetaCLiDE</Text>
+            <Text dimColor>  Multi-Agent Orchestration</Text>
+          </Box>
+          <Text dimColor>{'─'.repeat(60)}</Text>
         </Box>
         <ConductorSelect onSelect={handleConductorSelect} />
         {messages.length > 0 && (
@@ -699,10 +776,33 @@ export function App({repoRoot, orch, onExit, resumeSessionId}: AppProps) {
         <AgentManager
           agents={buildAgentEntries()}
           onModelChange={(agentId, model) => {
-            orch.updatePeerModel(agentId, model)
+            // Auto-add agent to peers.json if not configured yet
+            let peersFile = orch.readPeers()
+            if (!peersFile) {
+              // Create peers.json with conductor from current session
+              peersFile = {conductor: conductor?.displayName?.toLowerCase() ?? 'claude', peers: []}
+            }
+            const existing = peersFile.peers.find(p => p.id === agentId)
+            if (!existing) {
+              const builtIn = BUILT_IN_AGENTS.find(a => a.id === agentId)
+              peersFile.peers.push({
+                id: agentId,
+                displayName: builtIn?.displayName ?? agentId,
+                type: 'tool',
+                provider: (builtIn?.provider ?? agentId) as 'anthropic' | 'openai' | 'moonshot',
+                mode: builtIn?.defaultMode === 'oauth' ? 'oauth' : 'byok',
+                model,
+                contextFile: builtIn?.contextFile ?? 'AGENTS.md',
+                branch: `agent/${agentId}`,
+                role: 'implementer',
+              })
+              orch.writePeers(peersFile)
+            } else {
+              orch.updatePeerModel(agentId, model)
+            }
             setMessages(prev => [...prev, {
               id: nextId(), role: 'system',
-              content: `Model for ${agentId} → ${model}`,
+              content: `✓ ${agentId} configured → ${model}`,
             }])
           }}
           onBack={() => setShowAgents(false)}
@@ -715,10 +815,11 @@ export function App({repoRoot, orch, onExit, resumeSessionId}: AppProps) {
   if (showSessions) {
     const items = sessionList.length > 0
       ? sessionList.map(s => ({
+          key: s.id,
           label: `${s.title} (${s.conductorDisplayName}, ${new Date(s.updatedAt).toLocaleDateString()})`,
           value: s.id,
         }))
-      : [{label: 'No sessions found', value: ''}]
+      : [{key: 'empty', label: 'No sessions found', value: ''}]
 
     return (
       <Box flexDirection="column" padding={1}>
@@ -726,7 +827,7 @@ export function App({repoRoot, orch, onExit, resumeSessionId}: AppProps) {
         <Text bold>Resume a session:</Text>
         <Box marginTop={1}>
           <SelectInput
-            items={[...items, {label: '← Back', value: '__back__'}]}
+            items={[...items, {key: 'back', label: '← Back', value: '__back__'}]}
             onSelect={item => {
               if (item.value === '__back__' || !item.value) {
                 setShowSessions(false)
@@ -745,6 +846,8 @@ export function App({repoRoot, orch, onExit, resumeSessionId}: AppProps) {
                 if (cfg) {
                   getCredential(cfg.keychainId).then(key => {
                     startChat(choice, key ?? undefined, item.value)
+                  }).catch(() => {
+                    startChat(choice, undefined, item.value)
                   })
                 }
               }
@@ -772,15 +875,18 @@ export function App({repoRoot, orch, onExit, resumeSessionId}: AppProps) {
         <PeerStatusPanel peers={peerStatuses} phase={orchPhase} />
       )}
       <ChatHistory messages={messages} />
+      {!loading && !isOrchestrating && inputValue.startsWith('/') && (
+        <SlashMenu filter={inputValue.slice(1)} selectedIndex={slashIndex} />
+      )}
       {!loading && !isOrchestrating && (
         <Box>
-          <Text bold color="blue">you&gt; </Text>
-          <TextInput value={inputValue} onChange={setInputValue} onSubmit={handleSubmit} />
+          <Text bold color="cyanBright">❯ </Text>
+          <TextInput value={inputValue} onChange={(v) => { setInputValue(v); if (v.startsWith('/')) setSlashIndex(0) }} onSubmit={handleSubmit} />
         </Box>
       )}
       {isOrchestrating && (
-        <Box marginTop={1}>
-          <Text dimColor>Agents working... Ctrl+C to abort</Text>
+        <Box marginTop={0}>
+          <Text dimColor>Agents working  ·  Ctrl+C to abort</Text>
         </Box>
       )}
       {!isOrchestrating && (

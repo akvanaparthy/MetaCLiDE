@@ -95,13 +95,10 @@ export class PeerFactory {
         if (installed['codex']) {
           return new CodexPeer(config, repoRoot, worktreePath)
         }
-        // OAuth without CLI → can't work, need the CLI binary
-        if (config.mode === 'oauth') {
-          throw new Error(
-            'Codex CLI is required for subscription mode but not found in PATH.\n' +
-            'Install it: npm install -g @openai/codex\n' +
-            'Or use BYOK mode with an API key instead: metaclide agents add codex --key <key>'
-          )
+        // OAuth without CLI → fall back to AgenticApiPeer with API key from token exchange
+        // (the OAuth flow produces an sk-... key that works with the OpenAI API)
+        if (config.mode === 'oauth' && config.apiKey) {
+          return new AgenticApiPeer(config, repoRoot, worktreePath)
         }
         // BYOK without CLI → AgenticApiPeer (Kilocode-style loop over OpenAI API)
         return new AgenticApiPeer(config, repoRoot, worktreePath)
@@ -111,13 +108,9 @@ export class PeerFactory {
         if (installed['kimi']) {
           return new KimiPeer(config, repoRoot, worktreePath)
         }
-        // OAuth without CLI → can't work, need the CLI binary
-        if (config.mode === 'oauth') {
-          throw new Error(
-            'Kimi CLI is required for subscription mode but not found in PATH.\n' +
-            'Install it: pip install kimi-cli\n' +
-            'Or use BYOK mode with an API key instead: metaclide agents add kimi --key <key>'
-          )
+        // OAuth without CLI → fall back to AgenticApiPeer with Moonshot API
+        if (config.mode === 'oauth' && config.apiKey) {
+          return new AgenticApiPeer(config, repoRoot, worktreePath, 'https://api.moonshot.ai/v1')
         }
         // BYOK without CLI → AgenticApiPeer over Moonshot's OpenAI-compatible API
         return new AgenticApiPeer(config, repoRoot, worktreePath, 'https://api.moonshot.ai/v1')

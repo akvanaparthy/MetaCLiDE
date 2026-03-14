@@ -168,6 +168,9 @@ async function* fanIn<T>(iters: AsyncIterable<T>[]): AsyncIterable<T> {
     ;(async () => {
       try {
         for await (const v of iter) push({value: v})
+      } catch (err) {
+        // Peer crashed — emit error event instead of killing all peers
+        push({value: {type: 'log', level: 'error', message: `Peer crashed: ${err}`} as T})
       } finally {
         push({done: true})
       }
@@ -333,10 +336,22 @@ export class OrchestrationRunner {
     // ── Create worktrees ──
     yield {type: 'log', message: 'Creating agent worktrees...'}
     const worktreePaths: Record<string, string> = {}
+    const createdWorktrees: string[] = []
     for (const peer of selectedPeers) {
-      const wt = await wm.create(peer.id)
-      worktreePaths[peer.id] = wt
-      yield {type: 'log', message: `  ${peer.id}: ${wt}`}
+      try {
+        const wt = await wm.create(peer.id)
+        worktreePaths[peer.id] = wt
+        createdWorktrees.push(peer.id)
+        yield {type: 'log', message: `  ${peer.id}: ${wt}`}
+      } catch (err) {
+        // Clean up already-created worktrees on failure
+        yield {type: 'log', level: 'error', message: `Failed to create worktree for ${peer.id}: ${err}`}
+        for (const created of createdWorktrees) {
+          try { await wm.remove(created) } catch { /* best effort */ }
+        }
+        yield {type: 'error', message: `Worktree creation failed for ${peer.id}. Run 'git worktree prune' and retry.`}
+        return
+      }
     }
 
     // Inject context files
@@ -357,6 +372,8 @@ export class OrchestrationRunner {
 
     // Helper: track cost from peer events via the router
     function* trackCost(event: OrchEvent): Generator<OrchEvent> {
+      // Reset per-phase budget when a new phase starts
+      if (event.type === 'phase') router.setPhase(event.phase)
       if (event.type === 'peer_event' && event.peerEvent.type === 'result') {
         const cost = event.peerEvent.costUsd ?? 0
         const turns = event.peerEvent.turns ?? 0
@@ -370,6 +387,7 @@ export class OrchestrationRunner {
 
     // ── Phase 1: Discussion (implementers in parallel) ──
     if (!opts.skipPlanning && implementers.length > 0) {
+      router.setPhase('discuss')
       yield {type: 'phase', phase: 'discuss', message: 'Phase 1: Discussion'}
 
       const discussions: Record<string, string> = {}
@@ -456,6 +474,7 @@ export class OrchestrationRunner {
     yield {type: 'contract_locked', version, hash: lockedHash}
 
     // ── Phase 5: Implementation (all peers in parallel) ──
+    router.setPhase('implement')
     yield {type: 'phase', phase: 'implement', message: 'Phase 5: Implementation'}
 
     const plan = orch.readPlan()
@@ -475,7 +494,8 @@ export class OrchestrationRunner {
         // Budget check before dispatching
         if (router.isOverBudget(cfg.id, cfg.provider)) {
           return (async function*(): AsyncIterable<OrchEvent> {
-            yield {type: 'log', level: 'warn', message: `[${cfg.id}] over budget — skipping`}
+            const spent = router.getSessionCost(cfg.id)
+            yield {type: 'log', level: 'warn', message: `[${cfg.id}] over budget ($${spent.toFixed(2)} spent) — ${(tasksByOwner[cfg.id] ?? []).length} task(s) skipped`}
           })()
         }
         const peer = peers.get(cfg.id)!
@@ -495,15 +515,33 @@ export class OrchestrationRunner {
 ${JSON.stringify(cr, null, 2)}
 
 Decide: ACCEPT or REJECT (explain why).
-Respond with your decision and reasoning.`
+Respond with a single word ACCEPT or REJECT followed by your reasoning.`
 
+        let conductorResponse = ''
         for await (const e of conductorPeer.send({type: 'review', content: crPrompt})) {
+          if (e.type === 'text') conductorResponse += e.content ?? ''
+          if (e.type === 'result') conductorResponse = e.content ?? conductorResponse
           yield {type: 'peer_event', peerId: conductor.id, displayName: conductor.displayName, peerEvent: e}
+        }
+
+        // Persist the CR decision
+        const accepted = /\bACCEPT/i.test(conductorResponse)
+        cr.status = accepted ? 'accepted' : 'rejected'
+        cr.conductor_resolution = `[${conductor.id}] ${conductorResponse.slice(0, 500)}`
+        cr.resolved_at = new Date().toISOString()
+        orch.writeChangeRequest(cr)
+
+        if (accepted) {
+          orch.bumpContractVersion()
+          yield {type: 'log', message: `  CR ${cr.id}: accepted — contract version bumped`}
+        } else {
+          yield {type: 'log', message: `  CR ${cr.id}: rejected`}
         }
       }
     }
 
     // ── Phase 6: Integration ──
+    router.setPhase('integrate')
     yield {type: 'phase', phase: 'integrate', message: 'Phase 6: Integration'}
 
     try {
@@ -580,9 +618,15 @@ Respond with your decision and reasoning.`
       yield {type: 'log', level: 'warn', message: `Contract mismatches: ${mismatches.map(m => m.description).join('; ')}`}
     }
 
-    validator.writeIntegrationReport(gateResults as unknown as Record<string, string>, mismatches, fixIter)
+    try {
+      validator.writeIntegrationReport(gateResults as unknown as Record<string, string>, mismatches, fixIter)
+    } catch (err) {
+      yield {type: 'log', level: 'warn', message: `Failed to write integration report: ${err}`}
+    }
 
-    for (const peer of peers.values()) await peer.shutdown()
+    for (const peer of peers.values()) {
+      try { await peer.shutdown() } catch { /* best effort */ }
+    }
 
     // Emit cost summary
     const costSummary = router.summary()

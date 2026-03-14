@@ -21,59 +21,54 @@ export function ConductorSelect({onSelect}: ConductorSelectProps) {
   const kimiSubscription = hasKimiSession()
   const clis = detectInstalledCLIs()
 
-  function dot(connected: boolean) { return connected ? '●' : '○' }
-  function dotColor(connected: boolean) { return connected ? ' ✓' : '' }
+  const hasAnthropicKey = !!process.env.ANTHROPIC_API_KEY
 
-  const items: Array<{label: string; value: ConductorChoice}> = [
-    // ── Claude ──
+  const items: Array<{key: string; label: string; value: ConductorChoice}> = [
     {
-      label: `${dot(false)} Claude Code  (API key)  │ claude-sonnet-4-6  │ chat + agents`,
+      key: 'claude-byok',
+      label: `${hasAnthropicKey ? '●' : '○'}  Claude Code${hasAnthropicKey ? ' ✓' : ''}  │  API key  │  claude-sonnet-4-6`,
       value: {provider: 'anthropic', mode: 'byok', displayName: 'Claude'},
     },
-
-    // ── Codex / OpenAI subscription ──
     {
+      key: 'codex-oauth',
       label: codexSubscription
-        ? `● Codex  ✓ subscription  │ o4-mini  │ ${clis['codex'] ? 'CLI agent ready' : '⚠ codex CLI not installed'}`
-        : `○ Codex  (ChatGPT Plus/Pro login)  │ o4-mini  │ ${clis['codex'] ? 'CLI available' : 'needs codex CLI'}`,
+        ? `●  Codex ✓  │  subscription  │  ${clis['codex'] ? 'CLI ready' : '⚠ needs codex CLI'}`
+        : `○  Codex  │  ChatGPT Plus/Pro login  │  ${clis['codex'] ? 'CLI available' : 'needs codex CLI'}`,
       value: {provider: 'openai', mode: 'oauth', displayName: 'Codex'},
     },
-
-    // ── Codex BYOK ──
     {
+      key: 'codex-byok',
       label: codexApiKey
-        ? `● Codex / OpenAI  ✓ API key  │ o4-mini  │ ${clis['codex'] ? 'CLI agent' : 'agentic API'}`
-        : `○ Codex / OpenAI  (API key)  │ o4-mini  │ ${clis['codex'] ? 'CLI agent' : 'agentic API'}`,
+        ? `●  Codex / OpenAI ✓  │  API key  │  ${clis['codex'] ? 'CLI agent' : 'agentic API'}`
+        : `○  Codex / OpenAI  │  API key  │  ${clis['codex'] ? 'CLI agent' : 'agentic API'}`,
       value: {provider: 'openai', mode: 'byok', displayName: 'Codex'},
     },
-
-    // ── Kimi subscription ──
     {
+      key: 'kimi-oauth',
       label: kimiSubscription
-        ? `● Kimi Code  ✓ subscription  │ kimi-k2-thinking-turbo  │ ${clis['kimi'] ? 'CLI agent ready' : '⚠ kimi CLI not installed'}`
-        : `○ Kimi Code  (subscription login)  │ kimi-k2-thinking-turbo  │ ${clis['kimi'] ? 'CLI available' : 'needs kimi CLI'}`,
+        ? `●  Kimi Code ✓  │  subscription  │  ${clis['kimi'] ? 'CLI ready' : '⚠ needs kimi CLI'}`
+        : `○  Kimi Code  │  subscription login  │  ${clis['kimi'] ? 'CLI available' : 'needs kimi CLI'}`,
       value: {provider: 'moonshot', mode: 'oauth', displayName: 'Kimi'},
     },
-
-    // ── Kimi BYOK ──
     {
-      label: `○ Kimi / Moonshot  (API key)  │ kimi-k2-thinking-turbo  │ ${clis['kimi'] ? 'CLI agent' : 'agentic API'}`,
+      key: 'kimi-byok',
+      label: `○  Kimi / Moonshot  │  API key  │  ${clis['kimi'] ? 'CLI agent' : 'agentic API'}`,
       value: {provider: 'moonshot', mode: 'byok', displayName: 'Kimi'},
     },
   ]
 
   return (
     <Box flexDirection="column">
-      <Text bold>Choose your Conductor:</Text>
+      <Text bold color="white">Choose your conductor</Text>
       <Box marginBottom={1}>
-        <Text dimColor>● = connected  │ subscription = paid plan quota  │ API key = usage billing</Text>
+        <Text dimColor>● connected  │  ○ not connected  │  ↑↓ navigate  │  enter select</Text>
       </Box>
       <SelectInput
         items={items}
         onSelect={(item) => onSelect(item.value)}
       />
       <Box marginTop={1}>
-        <Text dimColor>After selecting: /agents to change models  •  /run to start all agents</Text>
+        <Text dimColor>/agents to manage models  ·  /run to start agents</Text>
       </Box>
     </Box>
   )

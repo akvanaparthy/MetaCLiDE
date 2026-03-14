@@ -171,11 +171,11 @@ export class KimiPeer implements Peer {
     const params = event.params as Record<string, unknown> | undefined
 
     if (method === 'request' && params?.type === 'ApprovalRequest') {
-      // Auto-approve safe ops; block deploy commands
+      // With -y flag, Kimi auto-approves all actions — these events are informational.
+      // Log dangerous actions for visibility but don't block.
       const action = String((params.payload as Record<string, unknown>)?.action ?? '')
-      const safe = /^(ls|cat|grep|npm (install|test|build|run)|git (status|log|diff|add|commit))/.test(action)
-      if (!safe && /deploy|publish|push/.test(action)) {
-        // Kimi wire protocol doesn't need a response from our side — we just skip
+      if (/deploy|publish|push/.test(action)) {
+        this.logger.append({type: 'system', content: `⚠ Kimi executing: ${action}`, taskId})
       }
       return
     }

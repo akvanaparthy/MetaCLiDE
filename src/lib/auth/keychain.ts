@@ -2,6 +2,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import crypto from 'node:crypto'
 
 const SERVICE = 'metaclide'
 
@@ -24,25 +25,64 @@ async function getKeytar() {
   return keytar
 }
 
-// Fallback: store in ~/.metaclide/credentials (obfuscated, not truly encrypted)
-const FALLBACK_FILE = path.join(os.homedir(), '.metaclide', 'credentials.json')
+// Fallback: store in ~/.metaclide/credentials (AES-256-GCM encrypted)
+const FALLBACK_FILE = path.join(os.homedir(), '.metaclide', 'credentials.enc')
+const LEGACY_FILE = path.join(os.homedir(), '.metaclide', 'credentials.json')
+
+// Derive a machine-specific key from hostname + username (not truly secret, but
+// prevents casual reading — OS keychain is preferred when available)
+function deriveKey(): Buffer {
+  const seed = `metaclide:${os.hostname()}:${os.userInfo().username}`
+  return crypto.scryptSync(seed, 'metaclide-salt', 32)
+}
+
+function encrypt(plaintext: string): string {
+  const key = deriveKey()
+  const iv = crypto.randomBytes(12)
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv)
+  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()])
+  const tag = cipher.getAuthTag()
+  // Store as iv:tag:ciphertext (all hex)
+  return `${iv.toString('hex')}:${tag.toString('hex')}:${encrypted.toString('hex')}`
+}
+
+function decrypt(data: string): string {
+  const key = deriveKey()
+  const [ivHex, tagHex, encHex] = data.split(':')
+  const iv = Buffer.from(ivHex, 'hex')
+  const tag = Buffer.from(tagHex, 'hex')
+  const encrypted = Buffer.from(encHex, 'hex')
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv)
+  decipher.setAuthTag(tag)
+  return decipher.update(encrypted) + decipher.final('utf8')
+}
 
 function readFallback(): Record<string, string> {
-  if (!fs.existsSync(FALLBACK_FILE)) return {}
-  try {
-    const raw = fs.readFileSync(FALLBACK_FILE, 'utf8')
-    const buf = Buffer.from(raw, 'base64')
-    const decrypted = buf.toString('utf8')
-    return JSON.parse(decrypted)
-  } catch {
-    return {}
+  // Try new encrypted format first
+  if (fs.existsSync(FALLBACK_FILE)) {
+    try {
+      const raw = fs.readFileSync(FALLBACK_FILE, 'utf8')
+      return JSON.parse(decrypt(raw))
+    } catch { /* corrupted — start fresh */ }
   }
+  // Migrate from legacy base64 format
+  if (fs.existsSync(LEGACY_FILE)) {
+    try {
+      const raw = fs.readFileSync(LEGACY_FILE, 'utf8')
+      const data = JSON.parse(Buffer.from(raw, 'base64').toString('utf8'))
+      // Re-save with real encryption
+      writeFallback(data)
+      fs.unlinkSync(LEGACY_FILE)
+      return data
+    } catch { /* corrupted */ }
+  }
+  return {}
 }
 
 function writeFallback(data: Record<string, string>): void {
   fs.mkdirSync(path.dirname(FALLBACK_FILE), {recursive: true})
-  const encoded = Buffer.from(JSON.stringify(data)).toString('base64')
-  fs.writeFileSync(FALLBACK_FILE, encoded, {mode: 0o600})
+  const encrypted = encrypt(JSON.stringify(data))
+  fs.writeFileSync(FALLBACK_FILE, encrypted, {mode: 0o600})
 }
 
 function fallbackKey(account: string): string {

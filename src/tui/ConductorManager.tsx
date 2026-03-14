@@ -2,13 +2,15 @@
 // Two-step flow:
 //   Step 1: Pick provider + auth mode (with live connection status)
 //   Step 2: Pick model for that provider
-import React, {useState} from 'react'
+import React, {useState, useEffect} from 'react'
 import {Box, Text, useInput} from 'ink'
 import SelectInput from 'ink-select-input'
 import {hasCodexOAuthSession, getCodexApiKey} from '../lib/auth/oauth-codex.js'
 import {hasKimiSession, getKimiAccessToken} from '../lib/auth/oauth-kimi.js'
 import {detectInstalledCLIs} from '../lib/auth/session.js'
+import {fetchAvailableModels} from './conductor.js'
 import {PROVIDER_MODELS} from './AgentManager.js'
+import {getCredential} from '../lib/auth/keychain.js'
 import type {ConductorChoice} from './ConductorSelect.js'
 
 export interface ConductorSelection {
@@ -111,36 +113,70 @@ function statusLabel(status: ProviderOption['authStatus']): string {
   return 'not connected'
 }
 
-// ── Step 2: Model picker ──
+// ── Step 2: Model picker (fetches from API) ──
+
+const ENV_KEYS: Record<string, string> = {
+  anthropic: 'ANTHROPIC_API_KEY',
+  openai: 'OPENAI_API_KEY',
+  moonshot: 'MOONSHOT_API_KEY',
+}
+
+const KEYCHAIN_IDS: Record<string, string> = {
+  anthropic: 'anthropic',
+  openai: 'openai',
+  moonshot: 'moonshot',
+}
 
 function ModelStep({option, onSelect, onBack}: {
   option: ProviderOption
   onSelect: (model: string) => void
   onBack: () => void
 }) {
+  const [models, setModels] = useState<string[]>([])
+  const [fetching, setFetching] = useState(true)
+
   useInput((_, key) => { if (key.escape) onBack() })
 
-  const models = PROVIDER_MODELS[option.choice.provider] ?? []
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const provider = option.choice.provider
+      let apiKey = process.env[ENV_KEYS[provider] ?? '']?.trim() ?? ''
+      if (!apiKey) {
+        const stored = await getCredential(KEYCHAIN_IDS[provider] ?? provider)
+        apiKey = stored?.trim() ?? ''
+      }
 
-  if (models.length === 0) {
+      if (apiKey) {
+        const fetched = await fetchAvailableModels(provider, apiKey)
+        if (!cancelled && fetched.length > 0) {
+          setModels(fetched)
+          setFetching(false)
+          return
+        }
+      }
+
+      // Fallback to hardcoded
+      if (!cancelled) {
+        const fallback = PROVIDER_MODELS[provider]
+        setModels(fallback?.length ? fallback.map(m => m.id) : [option.defaultModel])
+        setFetching(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [option.choice.provider, option.defaultModel])
+
+  if (fetching) {
     return (
       <Box flexDirection="column">
-        <Text>No official models defined for this provider. Using default: {option.defaultModel}</Text>
-        <Text dimColor>Press Esc to go back or Enter to confirm default.</Text>
+        <Text color="yellow">Fetching models from {option.choice.provider}...</Text>
       </Box>
     )
   }
 
   const items = [
-    ...models.map(m => ({
-      label: [
-        m.recommended ? '★ ' : '  ',
-        m.label.padEnd(30),
-        m.note,
-      ].join(''),
-      value: m.id,
-    })),
-    {label: '← Back', value: '__back__'},
+    ...models.map(m => ({key: m, label: m, value: m})),
+    {key: 'back', label: '← Back', value: '__back__'},
   ]
 
   return (
@@ -154,16 +190,16 @@ function ModelStep({option, onSelect, onBack}: {
           {option.cliInstalled ? ' • CLI installed' : ' • API loop'}
         </Text>
       </Box>
-      <Box marginBottom={1}>
-        <Text dimColor>★ = recommended</Text>
+      <Text dimColor>{models.length} models available</Text>
+      <Box marginTop={1}>
+        <SelectInput
+          items={items}
+          onSelect={(item) => {
+            if (item.value === '__back__') { onBack(); return }
+            onSelect(item.value)
+          }}
+        />
       </Box>
-      <SelectInput
-        items={items}
-        onSelect={(item) => {
-          if (item.value === '__back__') { onBack(); return }
-          onSelect(item.value)
-        }}
-      />
       <Box marginTop={1}>
         <Text dimColor>Esc to go back</Text>
       </Box>
@@ -210,6 +246,7 @@ export function ConductorManager({currentProvider, currentModel, onSelect, onBac
 
   const items = [
     ...options.map(opt => ({
+      key: `${opt.choice.provider}-${opt.choice.mode}`,
       label: [
         `${statusIcon(opt.authStatus)} `,
         opt.choice.displayName.padEnd(28),
@@ -218,7 +255,7 @@ export function ConductorManager({currentProvider, currentModel, onSelect, onBac
       ].join(''),
       value: opt.choice.displayName,
     })),
-    {label: '← Back', value: '__back__'},
+    {key: 'back', label: '← Back', value: '__back__'},
   ]
 
   return (

@@ -25,17 +25,18 @@ export interface ConductorConfig {
   orch: OrchManager
 }
 
-const CONDUCTOR_SYSTEM = `You are the Conductor agent in MetaCLiDE — a multi-agent coding orchestration system.
+const CONDUCTOR_SYSTEM = `You are the Conductor in MetaCLiDE, a multi-agent coding orchestration system.
 
-IMPORTANT RULES:
-1. When the user describes what they want to build, IMMEDIATELY call the save_brief tool. Do NOT ask for more details first. Save what they told you right away.
-2. After saving the brief, confirm what you saved and ask if they want to refine anything.
-3. Be concise. One short paragraph max per response.
-4. Never ask the user to format their input in a specific way. Accept whatever they say naturally.
-5. You can read the current brief and list project files for context.
+CRITICAL: When the user describes what they want to build, IMMEDIATELY call save_brief. Do NOT ask clarifying questions first. Save what they said, then confirm.
 
-You have these tools: save_brief (to save the project), read_brief (to read current brief), list_files (to see project files).
-When in doubt, save the brief first, refine later.`
+Rules:
+- Call save_brief on the FIRST message that describes a project. Always.
+- Be concise. 1-2 sentences max per response.
+- Accept natural language. Never ask the user to format anything.
+- After saving, say what you saved and ask if they want changes.
+- For follow-up questions, just respond conversationally.
+
+Tools: save_brief (save project info), read_brief (read current brief), list_files (see project files).`
 
 const DEFAULT_MODELS: Record<string, string> = {
   anthropic: 'claude-sonnet-4-20250514',
@@ -106,6 +107,8 @@ export class ConductorChat {
   private model: string
   private anthropicMessages: Array<{role: string; content: unknown}> = []
   private openaiMessages: Array<{role: string; content: string | null; tool_calls?: unknown[]; tool_call_id?: string}> = []
+  private cliHistory: Array<{role: 'user' | 'assistant'; content: string}> = []
+  private abortController: AbortController | null = null
 
   constructor(config: ConductorConfig) {
     this.config = config
@@ -120,7 +123,14 @@ export class ConductorChat {
   getProvider(): string { return this.config.provider }
   getApiKey(): string | undefined { return this.config.apiKey }
 
+  abort(): void {
+    this.abortController?.abort()
+    this.abortController = null
+  }
+
   async *send(userMessage: string): AsyncGenerator<StreamEvent> {
+    this.abortController = new AbortController()
+
     if (this.config.provider === 'anthropic') {
       yield* this.sendAnthropic(userMessage)
       return
@@ -150,7 +160,7 @@ export class ConductorChat {
     this.anthropicMessages.push({role: 'user', content: userMessage})
 
     try {
-      let response = await client.messages.create({
+      const response = await client.messages.create({
         model: this.model,
         max_tokens: 4096,
         system: CONDUCTOR_SYSTEM,
@@ -160,11 +170,14 @@ export class ConductorChat {
       })
 
       // Collect the full response while streaming
-      let currentText = ''
       const contentBlocks: Array<{type: string; text?: string; id?: string; name?: string; input?: unknown}> = []
       let stopReason = ''
 
       for await (const event of response) {
+        if (this.abortController?.signal.aborted) {
+          yield {type: 'done'}
+          return
+        }
         const e = event as unknown as Record<string, unknown>
 
         if (e.type === 'content_block_start') {
@@ -179,7 +192,6 @@ export class ConductorChat {
           const delta = e.delta as Record<string, unknown>
           if (delta.type === 'text_delta') {
             const text = String(delta.text ?? '')
-            currentText += text
             const last = contentBlocks[contentBlocks.length - 1]
             if (last?.type === 'text') last.text = (last.text ?? '') + text
             yield {type: 'text', content: text}
@@ -270,9 +282,12 @@ export class ConductorChat {
 
       let content = ''
       const toolCalls: Array<{id: string; name: string; arguments: string}> = []
-      let currentTool: {id: string; name: string; arguments: string} | null = null
 
       for await (const chunk of stream) {
+        if (this.abortController?.signal.aborted) {
+          yield {type: 'done'}
+          return
+        }
         const delta = chunk.choices[0]?.delta
         if (!delta) continue
 
@@ -335,29 +350,55 @@ export class ConductorChat {
 
   private async *sendViaCLI(userMessage: string): AsyncGenerator<StreamEvent> {
     const {execa} = await import('execa')
+    const path = await import('node:path')
     const isCodex = this.config.provider === 'openai'
     const cliName = isCodex ? 'codex' : 'kimi'
 
-    // CLI-specific system prompt: no tool calls, just conversational output.
-    // We extract brief content from the response ourselves.
-    const cliSystem = `You are the Conductor agent in MetaCLiDE — a multi-agent coding orchestration system.
+    // Accumulate conversation history for multi-turn context
+    this.cliHistory.push({role: 'user', content: userMessage})
 
-Your job is to understand what the user wants to build, then respond with a clear project brief.
+    const orchDir = path.join(this.config.repoRoot, '.orch')
+    const briefPath = path.join(orchDir, 'brief.md')
 
-RULES:
-1. When the user describes what they want to build, respond with the project brief in this format:
-   ---BRIEF---
-   # ProjectName
-   ## Requirements
-   (what should be built)
-   ## Tech Stack
-   (technologies to use)
-   ---END---
-2. After the brief block, add a short confirmation message.
-3. Be concise. Accept whatever the user says naturally.
-4. If the user asks questions or wants to refine, respond normally.`
+    // For the first message, instruct the CLI to write the brief file directly.
+    // For follow-up messages, just chat naturally.
+    const isFirstBrief = this.cliHistory.filter(m => m.role === 'user').length === 1
+      && !fs.existsSync(briefPath) || (fs.existsSync(briefPath) && fs.readFileSync(briefPath, 'utf8').includes('<!-- Brief will be written'))
 
-    const prompt = `${cliSystem}\n\n---\n\nUser: ${userMessage}`
+    let prompt: string
+    if (isFirstBrief) {
+      prompt = [
+        `The user wants to build a project. Their description:`,
+        ``,
+        `"${userMessage}"`,
+        ``,
+        `DO THIS NOW — write a project brief file to: ${briefPath}`,
+        `The file should contain:`,
+        `# <ProjectName>`,
+        `## Requirements`,
+        `<clear bullet list of what to build based on their description>`,
+        `## Tech Stack`,
+        `<technologies to use>`,
+        ``,
+        `After writing the file, respond with a SHORT confirmation (1-2 sentences) of what you saved.`,
+        `Do NOT explore other files. Do NOT read .orch/ directory. Just write the brief and confirm.`,
+      ].join('\n')
+    } else {
+      // Multi-turn: include history
+      const historyText = this.cliHistory.map(m =>
+        `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`
+      ).join('\n\n')
+
+      prompt = [
+        `You are a project planning assistant. The project brief is at ${briefPath}.`,
+        `If the user asks to change requirements, update that file.`,
+        `Otherwise just respond conversationally. Be concise.`,
+        `Do NOT explore or read .orch/ files unless asked.`,
+        ``,
+        `Conversation:`,
+        historyText,
+      ].join('\n')
+    }
 
     try {
       let args: string[]
@@ -379,6 +420,11 @@ RULES:
       const itemText = new Map<string, string>()
 
       for await (const chunk of proc.iterable()) {
+        if (this.abortController?.signal.aborted) {
+          proc.kill()
+          yield {type: 'done'}
+          return
+        }
         buffer += String(chunk)
         // Codex emits JSON without newlines — split on }{ boundary
         const parts = buffer.split(/\}\s*\{/).map((s, i, arr) =>
@@ -450,13 +496,24 @@ RULES:
 
       await proc
 
-      // Extract and save brief from the response
-      const briefMatch = fullText.match(/---BRIEF---\s*([\s\S]*?)\s*---END---/)
-      if (briefMatch) {
-        const briefContent = briefMatch[1].trim()
-        this.config.orch.writeBrief(briefContent)
+      // Save assistant response to history for multi-turn context
+      if (fullText.trim()) {
+        this.cliHistory.push({role: 'assistant', content: fullText.trim()})
+      }
+
+      // Check if CLI wrote the brief file directly
+      const currentBrief = this.config.orch.readBrief()
+      if (currentBrief && !currentBrief.includes('<!-- Brief will be written')) {
         yield {type: 'tool_start', toolName: 'save_brief'}
         yield {type: 'tool_done', toolName: 'save_brief', content: 'Brief saved'}
+      } else {
+        // Fallback: try to extract brief from the response text
+        const briefMatch = fullText.match(/---BRIEF---\s*([\s\S]*?)\s*---END---/)
+        if (briefMatch) {
+          this.config.orch.writeBrief(briefMatch[1].trim())
+          yield {type: 'tool_start', toolName: 'save_brief'}
+          yield {type: 'tool_done', toolName: 'save_brief', content: 'Brief saved'}
+        }
       }
 
       yield {type: 'done'}

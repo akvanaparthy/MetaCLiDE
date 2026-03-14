@@ -65,7 +65,7 @@ export default class Doctor extends Command {
     checks.push({
       name: 'OS Keychain (keytar)',
       status: keytarOk ? 'ok' : 'warn',
-      message: keytarOk ? 'Available' : 'Not available — using fallback file storage (~/.metaclide/credentials.json)',
+      message: keytarOk ? 'Available' : 'Not available — using encrypted fallback (~/.metaclide/credentials.enc)',
     })
 
     // Agent CLIs + auth status
