@@ -1,0 +1,26 @@
+Problem/Objective: Users pay for multiple AI coding subscriptions (Claude, ChatGPT/Codex, Kimi) but can only use them one at a time, manually switching between tools and wasting tokens on redundant context. I built MetaCLiDE, a terminal CLI that orchestrates these agents as a collaborative peer team working on a single codebase, using a contract-first protocol that prevents them from endlessly revising each other's work.
+
+My Role: Full-stack CLI developer and system architect. Designed the orchestration protocol, built the peer adapter layer, authentication/OAuth flows, git worktree isolation, contract locking, and the React+Ink TUI.
+
+What I Built & How:
+- Multi-agent orchestrator: Conductor-led pipeline — discussion → planning → contract lock → parallel implementation → integration — where 2–N heterogeneous agents self-organize as peers
+- Contract-first protocol: Canonical OpenAPI/JSON-Schema/TS contracts with version hashing, ACK/REJECT review, LOCK.contracts write exclusivity, and a consensus-pause mechanism for mid-flight change requests (prevents the oscillation problem)
+- Peer adapter layer: Unified Peer interface over Claude Agent SDK, Codex CLI subprocess (NDJSON events), Kimi CLI, and a generic OpenAI-compatible agentic loop — plus a plugin registry for new agents in <50 LOC
+- Isolation & integration: One git worktree per peer on agent/<id> branches, verification gates (lint/typecheck/build/test), mismatch detection, and an auto-fix loop on integration failures
+- Auth & budget: OAuth device-code + PKCE flows for Codex/Kimi, keychain-backed BYOK for Anthropic, per-provider/per-phase budget enforcement, crash recovery via runner-state.json
+- TUI + CLI: 11 oclif commands and 9 TUI slash commands (React + Ink), JSONL per-peer transcripts, live status dashboard
+
+Tools & Techniques:
+- Language/Runtime: TypeScript (ESM), Node.js 20+
+- CLI/UI: oclif v4, React + Ink v5, Inquirer
+- Agent SDKs: @anthropic-ai/claude-agent-sdk, OpenAI SDK (OpenAI-compatible providers), execa for CLI subprocesses
+- Infra: simple-git (worktrees), keytar (OS keychain), Zod + YAML (contracts), Vitest (101 tests)
+- Protocols: OAuth PKCE (RFC 7636), device-code flow (RFC 8628), OpenAPI 3.0, JSON Schema
+
+Challenges & Learnings:
+- Oscillation problem: Peers editing each other's code in loops — solved by freezing contracts during parallel phases and routing all changes through Conductor-mediated CRs
+- Heterogeneous I/O formats: Codex emits NDJSON without trailing newlines (had to split on }{ boundaries); sandbox modes differ per CLI; arg ordering is strict — required adapter-specific quirks behind a unified streaming interface
+- Auth policy drift: Anthropic banned third-party OAuth mid-build, forcing a BYOK-only path for Claude while preserving OAuth for others
+- State consistency under concurrency: Parallel peers writing to shared .orch/ needed strict per-peer status file ownership and contract hashing to detect drift
+
+Relevance to Brief: Shows I can design and ship a non-trivial agentic system — not just prompt an API, but coordinate multiple autonomous agents safely, handle real auth/OAuth, subprocess streaming, git-level isolation, and budget/observability — directly applicable to building production multi-agent workflows.

@@ -4,12 +4,12 @@
 //   Step 2: Pick model for that provider
 import React, {useState, useEffect} from 'react'
 import {Box, Text, useInput} from 'ink'
+import Spinner from 'ink-spinner'
 import SelectInput from 'ink-select-input'
 import {hasCodexOAuthSession, getCodexApiKey} from '../lib/auth/oauth-codex.js'
 import {hasKimiSession, getKimiAccessToken} from '../lib/auth/oauth-kimi.js'
 import {detectInstalledCLIs} from '../lib/auth/session.js'
-import {fetchAvailableModels} from './conductor.js'
-import {PROVIDER_MODELS} from './AgentManager.js'
+import {fetchAvailableModels, getLastFetchError} from './conductor.js'
 import {getCredential} from '../lib/auth/keychain.js'
 import type {ConductorChoice} from './ConductorSelect.js'
 
@@ -134,6 +134,7 @@ function ModelStep({option, onSelect, onBack}: {
 }) {
   const [models, setModels] = useState<string[]>([])
   const [fetching, setFetching] = useState(true)
+  const [error, setError] = useState('')
 
   useInput((_, key) => { if (key.escape) onBack() })
 
@@ -147,29 +148,44 @@ function ModelStep({option, onSelect, onBack}: {
         apiKey = stored?.trim() ?? ''
       }
 
-      if (apiKey) {
-        const fetched = await fetchAvailableModels(provider, apiKey)
-        if (!cancelled && fetched.length > 0) {
-          setModels(fetched)
+      if (!apiKey) {
+        if (!cancelled) {
+          setError(`No API key for ${provider}. Set ${ENV_KEYS[provider] ?? 'API key'} env var.`)
           setFetching(false)
-          return
         }
+        return
       }
 
-      // Fallback to hardcoded
+      const fetched = await fetchAvailableModels(provider, apiKey)
       if (!cancelled) {
-        const fallback = PROVIDER_MODELS[provider]
-        setModels(fallback?.length ? fallback.map(m => m.id) : [option.defaultModel])
+        if (fetched.length > 0) {
+          setModels(fetched)
+        } else {
+          setError(getLastFetchError() || `Could not fetch models from ${provider} API.`)
+        }
         setFetching(false)
       }
     })()
     return () => { cancelled = true }
-  }, [option.choice.provider, option.defaultModel])
+  }, [option.choice.provider])
 
   if (fetching) {
     return (
       <Box flexDirection="column">
-        <Text color="yellow">Fetching models from {option.choice.provider}...</Text>
+        <Box>
+          <Text color="cyan"><Spinner type="dots" /></Text>
+          <Text> Fetching models from {option.choice.provider} API...</Text>
+        </Box>
+      </Box>
+    )
+  }
+
+  if (error) {
+    return (
+      <Box flexDirection="column">
+        <Text color="red">{error}</Text>
+        <Text dimColor>Check your API key and network connection.</Text>
+        <Text dimColor>Esc to go back.</Text>
       </Box>
     )
   }

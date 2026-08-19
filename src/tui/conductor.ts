@@ -47,31 +47,45 @@ const DEFAULT_MODELS: Record<string, string> = {
 const API_BASES: Record<string, string> = {
   anthropic: 'https://api.anthropic.com',
   openai: 'https://api.openai.com',
-  moonshot: 'https://api.moonshot.cn',
+  moonshot: 'https://api.moonshot.ai',
 }
 
 const modelsCache: Record<string, string[]> = {}
+let lastFetchError = ''
+
+export function getLastFetchError(): string { return lastFetchError }
 
 export async function fetchAvailableModels(provider: string, apiKey: string): Promise<string[]> {
   if (modelsCache[provider]?.length) return modelsCache[provider]
+  lastFetchError = ''
 
   try {
     const base = API_BASES[provider]
-    if (!base) return []
+    if (!base) { lastFetchError = `Unknown provider: ${provider}`; return [] }
 
     const headers: Record<string, string> = provider === 'anthropic'
       ? {'x-api-key': apiKey, 'anthropic-version': '2023-06-01'}
       : {'Authorization': `Bearer ${apiKey}`}
 
-    const res = await fetch(`${base}/v1/models`, {headers})
-    if (!res.ok) return []
+    const url = `${base}/v1/models`
+    const res = await fetch(url, {headers, signal: AbortSignal.timeout(10000)})
+    if (!res.ok) {
+      lastFetchError = `${provider} API returned ${res.status}: ${res.statusText}`
+      return []
+    }
 
     const data = await res.json() as {data?: Array<{id: string}>}
     const ids = (data.data ?? []).map(m => m.id).sort()
 
+    if (ids.length === 0) {
+      lastFetchError = `${provider} API returned empty model list`
+      return []
+    }
+
     modelsCache[provider] = ids
     return ids
-  } catch {
+  } catch (err) {
+    lastFetchError = `${provider}: ${err instanceof Error ? err.message : String(err)}`
     return []
   }
 }
@@ -261,7 +275,7 @@ export class ConductorChat {
 
   private async *sendOpenAI(userMessage: string): AsyncGenerator<StreamEvent> {
     const {OpenAI} = await import('openai')
-    // Moonshot uses international endpoint; .cn as fallback
+    // Moonshot uses international endpoint
     const baseURL = this.config.provider === 'moonshot' ? 'https://api.moonshot.ai/v1' : undefined
     const client = new OpenAI({apiKey: this.config.apiKey, baseURL})
     const model = this.model
@@ -344,8 +358,8 @@ export class ConductorChat {
   //
   // CLI agents (Codex, Kimi) have their OWN tool sets (file edit, bash, etc.)
   // and don't know about our conductor tools (save_brief, etc.). So we:
-  // 1. Ask the LLM to just respond conversationally (no tool calls)
-  // 2. Parse the response for brief content and save it ourselves
+  // 1. Tell the CLI to write the brief file directly
+  // 2. Check if the file was updated after the CLI finishes
   // 3. Compute deltas for Codex (sends accumulated text, not deltas)
 
   private async *sendViaCLI(userMessage: string): AsyncGenerator<StreamEvent> {

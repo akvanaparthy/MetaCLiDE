@@ -1,10 +1,11 @@
 // AgentManager TUI — /agents command
 // Shows all agents with auth status + current model.
-// Selecting an agent opens an official model picker for that provider.
+// Selecting an agent opens a model picker that fetches models dynamically from the provider API.
 import React, {useState, useEffect} from 'react'
 import {Box, Text, useInput} from 'ink'
+import Spinner from 'ink-spinner'
 import SelectInput from 'ink-select-input'
-import {fetchAvailableModels} from './conductor.js'
+import {fetchAvailableModels, getLastFetchError} from './conductor.js'
 import {getCredential} from '../lib/auth/keychain.js'
 
 export interface AgentEntry {
@@ -25,31 +26,6 @@ interface AgentManagerProps {
   onBack: () => void
 }
 
-// ── Official model lists per provider (March 2026) ──
-
-export const PROVIDER_MODELS: Record<string, Array<{id: string; label: string; note: string; recommended?: boolean}>> = {
-  anthropic: [
-    {id: 'claude-opus-4-6',          label: 'Claude Opus 4.6',    note: 'Most capable — complex planning, architecture', recommended: false},
-    {id: 'claude-sonnet-4-6',        label: 'Claude Sonnet 4.6',  note: 'Balanced speed + capability', recommended: true},
-    {id: 'claude-haiku-4-5-20251001',label: 'Claude Haiku 4.5',   note: 'Fast, lightweight — simple tasks'},
-    {id: 'claude-opus-4-5',          label: 'Claude Opus 4.5',    note: 'Previous generation Opus'},
-    {id: 'claude-sonnet-4-5',        label: 'Claude Sonnet 4.5',  note: 'Previous generation Sonnet'},
-  ],
-  openai: [
-    {id: 'o4-mini',     label: 'o4-mini',     note: 'Fast reasoning, excellent for coding', recommended: true},
-    {id: 'o3',          label: 'o3',           note: 'Advanced reasoning'},
-    {id: 'o3-mini',     label: 'o3-mini',      note: 'Compact reasoning model'},
-    {id: 'gpt-4o',      label: 'GPT-4o',       note: 'Multimodal, fast'},
-    {id: 'gpt-4o-mini', label: 'GPT-4o mini',  note: 'Lightweight, cheap'},
-  ],
-  moonshot: [
-    {id: 'kimi-k2-thinking-turbo', label: 'Kimi K2 Thinking Turbo', note: 'Complex reasoning (recommended)', recommended: true},
-    {id: 'kimi-k2',                label: 'Kimi K2',                note: 'General coding tasks'},
-    {id: 'kimi-k2-5',              label: 'Kimi K2.5',              note: 'Latest multimodal model'},
-    {id: 'kimi-coding-k2.5',       label: 'Kimi Coding K2.5',       note: 'Specialized code generation'},
-    {id: 'kimi-k2-instruct',       label: 'Kimi K2 Instruct',       note: 'Instruction-following variant'},
-  ],
-}
 
 function authLabel(entry: AgentEntry): string {
   if (entry.authStatus === 'subscription') return '● subscription'
@@ -102,13 +78,7 @@ function ModelPicker({agent, onSelect, onBack}: {
 
       if (!apiKey) {
         if (!cancelled) {
-          // Fall back to hardcoded list
-          const fallback = PROVIDER_MODELS[agent.provider]
-          if (fallback?.length) {
-            setModels(fallback.map(m => m.id))
-          } else {
-            setError('No API key available to fetch models.')
-          }
+          setError(`No API key found for ${agent.provider}. Set ${ENV_KEYS[agent.provider] ?? 'API key'} env var or run: metaclide connect --agent ${agent.id}`)
           setFetching(false)
         }
         return
@@ -119,10 +89,7 @@ function ModelPicker({agent, onSelect, onBack}: {
         if (fetched.length > 0) {
           setModels(fetched)
         } else {
-          // Fallback
-          const fallback = PROVIDER_MODELS[agent.provider]
-          setModels(fallback?.length ? fallback.map(m => m.id) : [])
-          if (!fallback?.length) setError('Could not fetch models from API.')
+          setError(getLastFetchError() || `Could not fetch models from ${agent.provider} API.`)
         }
         setFetching(false)
       }
@@ -133,7 +100,10 @@ function ModelPicker({agent, onSelect, onBack}: {
   if (fetching) {
     return (
       <Box flexDirection="column">
-        <Text color="yellow">Fetching models from {agent.provider}...</Text>
+        <Box>
+          <Text color="cyan"><Spinner type="dots" /></Text>
+          <Text> Fetching models from {agent.provider} API...</Text>
+        </Box>
       </Box>
     )
   }
@@ -141,9 +111,9 @@ function ModelPicker({agent, onSelect, onBack}: {
   if (error || models.length === 0) {
     return (
       <Box flexDirection="column">
-        <Text bold>{error || `No models found for "${agent.provider}".`}</Text>
-        <Text dimColor>Set model manually: metaclide agents add {agent.id} --model &lt;model-id&gt;</Text>
-        <Text dimColor>Press Esc to go back.</Text>
+        <Text color="red">{error || `No models returned by ${agent.provider} API.`}</Text>
+        <Text dimColor>Check your API key and network connection.</Text>
+        <Text dimColor>Esc to go back.</Text>
       </Box>
     )
   }
@@ -166,7 +136,7 @@ function ModelPicker({agent, onSelect, onBack}: {
           <Text dimColor>  (API mode)</Text>
         )}
       </Box>
-      <Text dimColor>{models.length} models available</Text>
+      <Text dimColor>{models.length} models fetched from {agent.provider} API</Text>
       <Box marginTop={1}>
         <SelectInput
           items={items}
